@@ -1,0 +1,14 @@
+%% -*- erlang -*-
+{application, dotted_db,
+ [
+  {description, ""},
+  {vsn, "1"},
+  {registered, []},
+  {applications, [
+                  kernel,
+                  stdlib,
+                  riak_core
+                 ]},
+  {mod, { dotted_db_app, []}},
+  {env, []}
+ ]}.
