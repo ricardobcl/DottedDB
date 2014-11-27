@@ -4,7 +4,7 @@
 -define(N, 3).
 -define(R, 2).
 -define(W, 2).
--define(DEFAULT_BUCKET, list_to_binary("global")).
+-define(DEFAULT_BUCKET, <<"g">>).
 -define(DELETE_OP, delete_op).
 -define(WRITE_OP, write_op).
 

@@ -56,7 +56,7 @@ pp(#stats_sync{
         keylog_length_b         = KLL,
         keylog_size_b           = KLS,
         replicated_vv_size_b    = VV }) ->
-    io:format("========== SYNC ==========\n"),
+    io:format("\n\n========== SYNC ==========\n"),
     io:format("\t Node A:            \t ~p\n",[A]),
     io:format("\t Node B:            \t ~p\n",[B]),
     io:format("\t Duration (micro):  \t ~p\n",[ET-ST]),
@@ -65,7 +65,7 @@ pp(#stats_sync{
     io:format("\t Objects Size Full: \t ~p\n",[FOS]),
     io:format("\t KeyLog Length:     \t ~p\n",[KLL]),
     io:format("\t KeyLog Size:       \t ~p\n",[KLS]),
-    io:format("\t Replicated VV Size:\t ~p\n",[VV]).
+    io:format("\t Replicated VV Size:\t ~p\n\n",[VV]).
 
 
 %% Internal Functions

@@ -4,7 +4,7 @@
 -include("dotted_db.hrl").
 
 %% API
--export([start_link/3]).
+-export([start_link/2]).
 
 %% Callbacks
 -export([init/1, code_change/4, handle_event/3, handle_info/3,
@@ -30,8 +30,8 @@
 %%% API
 %%%===================================================================
 
-start_link(ReqID, From, IdxNode) ->
-    gen_fsm:start_link(?MODULE, [ReqID, From, IdxNode], []).
+start_link(ReqID, From) ->
+    gen_fsm:start_link(?MODULE, [ReqID, From], []).
 
 
 %%%===================================================================
@@ -39,7 +39,9 @@ start_link(ReqID, From, IdxNode) ->
 %%%===================================================================
 
 %% @doc Initialize the state data.
-init([ReqID, From, IdxNode]) ->
+init([ReqID, From]) ->
+    ThisNode = node(),
+    IdxNode = {_, ThisNode} = dotted_db_utils:random_index_from_node(ThisNode),
     SD = #state{
         req_id      = ReqID,
         from        = From,

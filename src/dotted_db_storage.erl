@@ -75,14 +75,6 @@ fold(Engine, Fun, Acc0) ->
 
 %% @doc Returns true if this backend contains any values; otherwise returns false.
 -spec is_empty(storage()) -> boolean() | {error, term()}.
-is_empty(#engine{ref=Ref, mod=Mod}) ->
-    case Mod of
-        rkvs_leveldb ->
-            eleveldb:is_empty(Ref);
-        rkvs_ets     ->
-            case ets:info(Ref, size) of
-                undefined   -> true;
-                Size        -> Size =:= 0
-            end
-    end.
+is_empty(Engine) ->
+    rkvs:is_empty(Engine).
 

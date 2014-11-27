@@ -4,7 +4,7 @@
 
 -include("dotted_db.hrl").
 
-%% @private
+
 make_request_id() ->
     erlang:phash2({self(), os:timestamp()}). % only has to be unique per-pid
 
@@ -19,10 +19,6 @@ replica_nodes(Key) ->
     DocIdx = get_DocIdx(Key),
     [IndexNode || {IndexNode, _Type} <- riak_core_apl:get_primary_apl(DocIdx, ?N, dotted_db)].
 
-% get_DocIdx(Key) when is_list(Key) ->
-%     riak_core_util:chash_key({?DEFAULT_BUCKET, list_to_binary(Key)});
-% get_DocIdx(Key) when is_integer(Key) ->
-%     riak_core_util:chash_key({?DEFAULT_BUCKET, integer_to_binary(Key)});
 get_DocIdx(Key) when is_binary(Key) ->
     riak_core_util:chash_key({?DEFAULT_BUCKET, Key}).
     
@@ -43,10 +39,17 @@ random_index_node() ->
     IndexNodes = riak_core_ring:all_owners(Ring),
     random_from_list(IndexNodes).
 
--spec random_local_index_node() -> [index_node()].
-random_local_index_node() ->
-    {ok, Ring} = riak_core_ring_manager:get_my_ring(),
-    IndexNodes = [{Idx,Node} || {Idx,Node} <- riak_core_ring:all_owners(Ring), Node =:= node()],
+% -spec random_index_from_node(node()) -> [index_node()].
+% random_index_from_node(TargetNode) ->
+%     {ok, Ring} = riak_core_ring_manager:get_my_ring(),
+%     IndexNodes = [{Idx,Node} || {Idx,Node} <- riak_core_ring:all_owners(Ring), Node =:= TargetNode],
+%     random_from_list(IndexNodes).
+
+-spec random_index_from_node(node()) -> [index_node()].
+random_index_from_node(TargetNode) ->
+    {ok, RingBin} = riak_core_ring_manager:get_chash_bin(),
+    Filter = fun ({_Index, Owner}) -> Owner =:= TargetNode end,
+    IndexNodes = chashbin:to_list_filter(Filter, RingBin),
     random_from_list(IndexNodes).
 
 
@@ -81,9 +84,10 @@ random_from_list(List) ->
     lists:nth(Index,List).
 
 
-
+-spec encode_kv(term()) -> binary().
 encode_kv(Term) ->
     term_to_binary(Term).
 
+-spec decode_kv(binary()) -> term().
 decode_kv(Binary) ->
     binary_to_term(Binary).

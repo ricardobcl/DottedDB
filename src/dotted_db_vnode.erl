@@ -105,16 +105,21 @@ init([Index]) ->
     Backend = case app_helper:get_env(dotted_db, storage_backend) of
         leveldb     -> {backend, leveldb};
         ets         -> {backend, ets};
-        _SB         -> {backend, leveldb}
+        _SB         -> {backend, ets}
     end,
     {ok, Storage} = dotted_db_storage:open(DBName, [Backend]),
-    % lager:info("Backend ==> ~p",[Backend]),
+    % get this node's peers, i.e., all nodes that replicates any subset of local keys
+    PeerIDs = [ ID || {ID, _Node} <- dotted_db_utils:peers(Index)],
+    % for replication factor N = 3, the numbers of peers should be 4 (2 vnodes before and 2 after)
+    (?N-1)*2 = length(PeerIDs),
+    Replicated = lists:foldl(fun (ID,VV) -> vv:add(VV,{ID,0}) end , vv:new(), PeerIDs),
+    (?N-1)*2 = length(Replicated),
     S = #state{
         id          = Index, % or {Index, node()},
         index       = Index,
         clock       = bvv:new(),
         objects     = Storage,
-        replicated  = vv:new(),
+        replicated  = Replicated,
         keylog      = {0,[]}
     },
     {ok, S}.
@@ -124,6 +129,7 @@ init([Index]) ->
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%% READING
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 handle_command({read, ReqID, Key}, _Sender, State) ->
     Response =
@@ -149,6 +155,7 @@ handle_command({read, ReqID, Key}, _Sender, State) ->
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%% WRITING
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 handle_command({write, ReqID, Operation, Key, Value, Context}, _Sender, State) ->
     % get and fill the causal history of the local key
@@ -199,6 +206,7 @@ handle_command({replicate, ReqID, Key, NewDCC}, _Sender, State) ->
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%% SYNCHRONIZING
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 handle_command({sync_start, ReqID}, _Sender, State) ->
     % get this node's peers, i.e., all nodes that replicates any subset of local keys

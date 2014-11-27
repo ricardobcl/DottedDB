@@ -13,13 +13,12 @@
          put/3,
          put_at_node/3,
          put_at_node/4,
-         % delete/1,
          delete/2,
-         % delete_at_node/2,
          delete_at_node/3,
          sync/0,
-         sync_local/0,
+         sync_at_node/1,
          test/0,
+         test/1,
          get_dbg_preflist/1,
          get_dbg_preflist/2
         ]).
@@ -28,7 +27,9 @@
               ping/0
              ]).
 
-%% Public API
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%% PUBLIC API
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 %% @doc Pings a random vnode to make sure communication is functional
 ping() ->
@@ -38,6 +39,8 @@ ping() ->
     riak_core_vnode_master:sync_spawn_command(IndexNode, ping, dotted_db_vnode_master).
 
 
+%% @doc Returns a pair with this module name and the local node().
+%% It can be used by client apps to connect to a DottedDB node and execute commands.
 new_client() ->
     new_client(node()).
 new_client(Node) ->
@@ -45,6 +48,13 @@ new_client(Node) ->
         pang -> {error, {could_not_reach_node, Node}};
         pong -> {ok, {?MODULE, Node}}
     end.
+
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%% READING
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 %% @doc Get a value from a key. If no target node is specified, use this node.
 get(Key) ->
@@ -64,6 +74,13 @@ get(Key, {?MODULE, TargetNode}) ->
             proc_lib:spawn_link(TargetNode, dotted_db_get_fsm, start_link, Request)
     end,
     wait_for_reqid(ReqID, ?DEFAULT_TIMEOUT).
+
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%% UPDATES -> PUTs & DELETEs
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 %% @doc
 put(Key, Value) ->
@@ -106,37 +123,48 @@ put_del([Key, Value, Context, Operation], {?MODULE, TargetNode}) ->
 
 
 
-%% @doc Forces a random anti-entropy synchronization with another node.
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%% SYNCHRONIZATION
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+%% @doc Forces a random anti-entropy synchronization between two random vnodes 
+%% from random nodes.
+% sync() ->
+%     % IdxNode = dotted_db_utils:random_index_node(),
+%     do_sync(IdxNode).
+
+%% @doc Forces a anti-entropy synchronization with a vnode from the local node 
+%% with another random vnode from a random node.
 sync() ->
-    IdxNode = dotted_db_utils:random_index_node(),
-    do_sync(IdxNode).
+    sync_at_node({?MODULE, node()}).
 
-%% @doc Forces a anti-entropy synchronization with a vnode from this node 
-%% with another random vnode.
-sync_local() ->
-    ThisNode = node(),
-    IdxNode = {_, ThisNode} = dotted_db_utils:random_local_index_node(),
-    do_sync(IdxNode).
-
-% @doc Private function used by sync/0 and sync_local/0.
-do_sync(IdxNode = {_, TargetNode}) ->
+%% @doc Forces a anti-entropy synchronization with a vnode from the received node 
+%% with another random vnode from a random node.
+sync_at_node({?MODULE, TargetNode}) ->
+    % IdxNode = {_, TargetNode} = dotted_db_utils:random_index_from_node(TargetNode),
     Me = self(),
     ReqID = dotted_db_utils:make_request_id(),
-    Request = [ReqID, Me, IdxNode],
+    Request = [ReqID, Me],
     case node() of
         TargetNode ->
             dotted_db_sync_fsm_sup:start_sync_fsm(Request);
         _ ->
             proc_lib:spawn_link(TargetNode, dotted_db_sync_fsm, start_link, Request)
     end,
-    {ok, Stats} = wait_for_reqid(ReqID, ?DEFAULT_TIMEOUT),
-    stats:pp(Stats).
+    wait_for_reqid(ReqID, ?DEFAULT_TIMEOUT).
+    % {ok, Stats} = wait_for_reqid(ReqID, ?DEFAULT_TIMEOUT),
+    % stats:pp(Stats).
 
 
+
+
+
+test(N) ->
+    [test() || _ <- lists:seq(1,N)].
 
 test() ->
     {not_found, _} = get("random_key"),
-    K1 = "key9",
+    K1 = dotted_db_utils:make_request_id(),
     ok = put(K1,"v1"),
     ok = put("key2","vb"),
     ok = put(K1,"v3"),
@@ -144,18 +172,18 @@ test() ->
     ok = put(K1,"v2"),
     {ok, {Values, Ctx}} = get(K1),
     V123 = lists:sort(Values),
-    % ?PRINT(V123),
     ["v1","v2","v3"] = V123,
     ok = put(K1, "final", Ctx),
     {ok, {Final, Ctx2}} = get(K1),
-    % ?PRINT(Final),
     ["final"] = Final,
     ok = delete(K1,Ctx2),
     Del = get(K1),
-    % ?PRINT(Del),
     {not_found, _Ctx3} = Del,
-    sync_local(),
-    sync(),
+    {ok, Stats1} = sync(),
+    stats:pp(Stats1),
+    {ok, Client} = new_client(),
+    {ok, Stats2} = sync_at_node(Client),
+    stats:pp(Stats2),
     ok.
 
 

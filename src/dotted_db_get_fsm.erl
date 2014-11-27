@@ -68,10 +68,6 @@ execute(timeout, State=#state{  req_id      = ReqId,
     dotted_db_vnode:read(ReplicaNodes, ReqId, Key),
     {next_state, waiting, State}.
 
-
-%% @doc Wait for R replies and then respond to "From", the original client
-%% that called `rts:get/2'.
-
 %% @doc Wait for W-1 write acks. Timeout is 5 seconds by default (see dotted_db.hrl).
 waiting(timeout, State=#state{  req_id      = ReqID,
                                 from        = From}) ->
