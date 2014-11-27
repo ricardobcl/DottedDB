@@ -74,7 +74,7 @@ sync_response({ok, ReqID, RemoteNodeID, RemoteNodeClockBase, MissingObjects, Sta
 %% @doc 
 sync_ack({ok, ReqID}, State) ->
     Stats = stats:end_sync(State#state.stats),
-    State#state.from ! {ReqID, {ok, Stats}},
+    State#state.from ! {ReqID, ok, {sync, Stats}},
     {stop, normal, State}.
 
 

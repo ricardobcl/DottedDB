@@ -6,7 +6,7 @@
 -include("dotted_db.hrl").
 
 %% API
--export([start_link/4, start_link/5,  start_link/6]).
+-export([start_link/6]).
 
 %% Callbacks
 -export([init/1, code_change/4, handle_event/3, handle_info/3,
@@ -15,26 +15,11 @@
 %% States
 -export([prepare/2, write/2, waiting_coordinator/2, waiting_replicas/2]).
 
-
-%% req_id: The request id so the caller can verify the response.
-%%
-%% sender: The pid of the sender so a reply can be made.
-%%
-%% client: The external entity that wrote the log entry that produced
-%% this stat.
-%%
-%% state_name: The name of the statistic.
-%%
-%% op: The stat op, one of [set, incr, incr_by, append, sadd]
-%%
-%% prelist: The preflist for the given {Client, Key} pair.
-%%
-%% num_w: The number of successful write replies.
 -record(state, {
     req_id          :: pos_integer(),
     from            :: pid(),
     coordinator     :: node(),
-    operation       :: op(), 
+    operation       :: operation(), 
     key             :: key(),
     value           :: term() | undefined,
     context         :: vv(),
@@ -45,22 +30,14 @@
     stats           :: stats_reqs()
 }).
 
--type op() :: write | delete.
+-type operation() :: ?WRITE_OP | ?DELETE_OP.
 
 %%%===================================================================
 %%% API
 %%%===================================================================
 
-start_link(ReqID, From, delete, Key) ->
-    start_link(ReqID, From, delete, Key, vv:new()).
-
-start_link(ReqID, From, delete, Key, Context) ->
-    start_link(ReqID, From, delete, Key, undefined, Context);
-start_link(ReqID, From, write, Key, Value) ->
-    start_link(ReqID, From, write, Key, Value, vv:new()).
-
-start_link(ReqID, From, Op, Key, Value, Context) ->
-    gen_fsm:start_link(?MODULE, [ReqID, From, Op, Key, Value, Context], []).
+start_link(ReqID, From, Operation, Key, Value, Context) ->
+    gen_fsm:start_link(?MODULE, [ReqID, From, Operation, Key, Value, Context], []).
 
 
 %%%===================================================================

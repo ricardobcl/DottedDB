@@ -5,6 +5,8 @@
 -define(R, 2).
 -define(W, 2).
 -define(DEFAULT_BUCKET, list_to_binary("global")).
+-define(DELETE_OP, delete_op).
+-define(WRITE_OP, write_op).
 
 
 -type vv()     :: [{Key :: id(), Entry :: counter()}]. % orddict().

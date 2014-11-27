@@ -9,10 +9,14 @@
          new_client/1,
          get/1,
          get/2,
-         put/1,
          put/2,
-         delete/1,
+         put/3,
+         put_at_node/3,
+         put_at_node/4,
+         % delete/1,
          delete/2,
+         % delete_at_node/2,
+         delete_at_node/3,
          sync/0,
          sync_local/0,
          test/0,
@@ -62,21 +66,28 @@ get(Key, {?MODULE, TargetNode}) ->
     wait_for_reqid(ReqID, ?DEFAULT_TIMEOUT).
 
 %% @doc
-put(KeyValCtx) ->
+put(Key, Value) ->
+    put(Key, Value, vv:new()).
+put(Key, Value, Context) ->
     {ok, LocalNode} = new_client(),
-    put(KeyValCtx, LocalNode).
-put([Key, Value], TargetNode) ->
-    put([Key, Value, vv:new()], TargetNode);
-put([Key, Value, Context], TargetNode) ->
-    put_del([Key, Value, Context, write], TargetNode).
+    put_del([Key, Value, Context, ?WRITE_OP], LocalNode).
 
-delete(KeyCtx) ->
+put_at_node(Key, Value, TargetNode) ->
+    put_at_node(Key, Value, vv:new(), TargetNode).
+put_at_node(Key, Value, Context, TargetNode) ->
+    put_del([Key, Value, Context, ?WRITE_OP], TargetNode).
+
+
+% delete(Key) ->
+%     delete(Key, vv:new()).
+delete(Key, Context) ->
     {ok, LocalNode} = new_client(),
-    delete(KeyCtx, LocalNode).
-delete([Key], TargetNode) ->
-    delete([Key, vv:new()], TargetNode);
-delete([Key, Context], TargetNode) ->
-    put_del([Key, undefined, Context, delete], TargetNode).
+    put_del([Key, undefined, Context, ?DELETE_OP], LocalNode).
+
+% delete_at_node(Key, TargetNode) ->
+%     delete_at_node(Key, vv:new(), TargetNode);
+delete_at_node(Key, Context, TargetNode) ->
+    put_del([Key, undefined, Context, ?DELETE_OP], TargetNode).
 
 % @doc Writes normal PUTs and DELETEs
 put_del([Key, Value, Context, Operation], {?MODULE, TargetNode}) ->
@@ -97,34 +108,90 @@ put_del([Key, Value, Context, Operation], {?MODULE, TargetNode}) ->
 
 %% @doc Forces a random anti-entropy synchronization with another node.
 sync() ->
+    IdxNode = dotted_db_utils:random_index_node(),
+    do_sync(IdxNode).
+
+%% @doc Forces a anti-entropy synchronization with a vnode from this node 
+%% with another random vnode.
+sync_local() ->
+    ThisNode = node(),
+    IdxNode = {_, ThisNode} = dotted_db_utils:random_local_index_node(),
+    do_sync(IdxNode).
+
+% @doc Private function used by sync/0 and sync_local/0.
+do_sync(IdxNode = {_, TargetNode}) ->
     Me = self(),
     ReqID = dotted_db_utils:make_request_id(),
-    IdxNode = {_, ThisNode} = dotted_db_utils:random_index_node(),
-    proc_lib:spawn_link(ThisNode, dotted_db_sync_fsm, start_link, [ReqID, Me, IdxNode]),
+    Request = [ReqID, Me, IdxNode],
+    case node() of
+        TargetNode ->
+            dotted_db_sync_fsm_sup:start_sync_fsm(Request);
+        _ ->
+            proc_lib:spawn_link(TargetNode, dotted_db_sync_fsm, start_link, Request)
+    end,
     {ok, Stats} = wait_for_reqid(ReqID, ?DEFAULT_TIMEOUT),
     stats:pp(Stats).
 
-sync_local() ->
-    Me = self(),
-    ReqID = dotted_db_utils:make_request_id(),
-    ThisNode = node(),
-    IdxNode = {_, ThisNode} = dotted_db_utils:random_local_index_node(),
-    dotted_db_sync_fsm_sup:start_sync_fsm([ReqID, Me, IdxNode]),
-    {ok, Stats} = wait_for_reqid(ReqID, ?DEFAULT_TIMEOUT),
-    stats:pp(Stats).
 
 
 test() ->
-    ok = put(["key1","va"]),
-    ok = put(["key2","vb"]),
-    ok = put(["key3","vc"]),
-    ok = put(["key1","v2"]),
-    ok = put(["key1","v3"]),
-    {ok, {Val, VV}} = get("key1"),
-    ?PRINT({Val, VV}),
-    ok = put(["key1","final",VV]),
-    {ok, {Val2, VV2}} = get("key1"),
-    ?PRINT({Val2, VV2}).
+    {not_found, _} = get("random_key"),
+    K1 = "key9",
+    ok = put(K1,"v1"),
+    ok = put("key2","vb"),
+    ok = put(K1,"v3"),
+    ok = put("key3","vc"),
+    ok = put(K1,"v2"),
+    {ok, {Values, Ctx}} = get(K1),
+    V123 = lists:sort(Values),
+    % ?PRINT(V123),
+    ["v1","v2","v3"] = V123,
+    ok = put(K1, "final", Ctx),
+    {ok, {Final, Ctx2}} = get(K1),
+    % ?PRINT(Final),
+    ["final"] = Final,
+    ok = delete(K1,Ctx2),
+    Del = get(K1),
+    % ?PRINT(Del),
+    {not_found, _Ctx3} = Del,
+    sync_local(),
+    sync(),
+    ok.
+
+
+
+
+%%%===================================================================
+%%% Internal Functions
+%%%===================================================================
+
+wait_for_reqid(ReqID, Timeout) ->
+    receive
+        {ReqID, error, Error}       -> {error, Error};
+        % get
+        {ReqID, not_found, Context} -> {not_found, Context};
+        {ReqID, ok, Reply}          -> {ok, decode_get_reply(Reply)};
+        % put/delete
+        {ReqID, ok}                 -> ok;
+        {ReqID, timeout}            -> {error, timeout}
+    after Timeout ->
+            {error, timeout}
+    end.
+
+
+decode_get_reply({sync, Stats}) ->
+    Stats;
+decode_get_reply({BinValues, Context}) ->
+    Values = [ dotted_db_utils:decode_kv(BVal) || BVal <- BinValues ],
+    {Values, Context}.
+
+
+
+
+
+
+
+
 
 
 
@@ -140,25 +207,3 @@ get_dbg_preflist(Key, N) ->
                                             {get, req_id, Key},
                                             dotted_db_vnode_master),
     [IdxNode, Val].
-
-%%%===================================================================
-%%% Internal Functions
-%%%===================================================================
-
-wait_for_reqid(ReqID, Timeout) ->
-    receive
-        {ReqID, error, Error}   -> {error, Error};
-        % get
-        {ReqID, not_found}      -> {ok, not_found};
-        {ReqID, ok, Reply}      -> {ok, decode_get_reply(Reply)};
-        % put/delete
-        {ReqID, ok}             -> ok;
-        {ReqID, timeout}        -> {error, timeout}
-    after Timeout ->
-            {error, timeout}
-    end.
-
-
-decode_get_reply({BinValues, Context}) ->
-    Values = [ dotted_db_utils:decode_kv(BVal) || BVal <- BinValues ],
-    {Values, Context}.

@@ -130,7 +130,9 @@ handle_command({read, ReqID, Key}, _Sender, State) ->
         case dotted_db_storage:get(State#state.objects, Key) of
             {error, not_found} -> 
                 % there is no key K in this node
-                not_found;
+                % create an empty "object" and fill its causality with the node clock
+                % this is needed to ensure that deletes "win" over old writes at the coordinator
+                dcc:fill(dcc:new(), State#state.clock);
             {error, Error} -> 
                 % some unexpected error
                 lager:error("Error reading a key from storage (command read): ~p", [Error]),
@@ -148,25 +150,32 @@ handle_command({read, ReqID, Key}, _Sender, State) ->
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%% WRITING
 
-handle_command({write, ReqID, _Op, Key, Value, Context}, _Sender, State) ->
+handle_command({write, ReqID, Operation, Key, Value, Context}, _Sender, State) ->
     % get and fill the causal history of the local key
     DiskDCC = guaranteed_get(Key, State),
-     % discard obsolete values w.r.t the causal context
+    % discard obsolete values w.r.t the causal context
     DiscardDCC = dcc:discard(DiskDCC, Context),
     % generate a new dot for this write/delete and add it to the node clock
     {Dot, NodeClock} = bvv:event(State#state.clock, State#state.id),
-    % test if this is a delete; if not, add dot-value to the key
+    % test if this is a delete; if not, add dot-value to the DCC container
     NewDCC =
-        case Value of
-            % DELETE
-            undefined   -> DiscardDCC;
-            % PUT
-            _           -> dcc:add(DiscardDCC, {State#state.id, Dot}, Value)
+        case Operation of
+            ?DELETE_OP  -> % DELETE
+                DiscardDCC;
+            ?WRITE_OP   -> % PUT
+                dcc:add(DiscardDCC, {State#state.id, Dot}, Value)
         end,
-% ?PRINT({Dot, NodeClock}),
-% ?PRINT(NewDCC),
-    % save the new key DCC in the map, while stripping the unnecessary causality
-    ok = dotted_db_storage:put(State#state.objects, Key, dcc:strip(NewDCC, NodeClock)),
+    % removed unnecessary causality from the DCC, based on the current node clock
+    StrippedDCC = dcc:strip(NewDCC, NodeClock),
+    % check if the resulting object/DCC is empty (i.e. it was deleted and has no causal history)
+    case StrippedDCC  =:= dcc:new() of
+        true -> % we can safely remove this key from disk (distributed deletes done right :-))
+            ok = dotted_db_storage:delete(State#state.objects, Key);
+        false -> % we still have relevant information (PUT or DELETE).
+        % this can still be a client delete, if the DCC has causal information 
+        % newer than the node clock; or its a normal PUT.
+            ok = dotted_db_storage:put(State#state.objects, Key, StrippedDCC)
+    end,
     % append the key to the tail of the key log
     {Base, Keys} = State#state.keylog,
     KeyLog = {Base, Keys ++ [Key]},
@@ -333,13 +342,15 @@ terminate(_Reason, _State) ->
 %% Private
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-% @doc Returns the (filled) value (DCC) associated with the Key. If the key does not
-% exists or for some reason, the storage returns an error, return an empty DCC.
+% @doc Returns the value (DCC) associated with the Key. 
+% By default, we want to return a filled causality, unless we get a storage error.
+% If the key does not exists or for some reason, the storage returns an 
+% error, return an empty DCC (also filled).
 guaranteed_get(Key, State) ->
     case dotted_db_storage:get(State#state.objects, Key) of
         {error, not_found} -> 
             % there is no key K in this node
-            dcc:new();
+            dcc:fill(dcc:new(), State#state.clock);
         {error, Error} -> 
             % some unexpected error
             lager:error("Error reading a key from storage (guaranteed GET): ~p", [Error]),

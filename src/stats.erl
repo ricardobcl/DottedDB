@@ -56,7 +56,9 @@ pp(#stats_sync{
         keylog_length_b         = KLL,
         keylog_size_b           = KLS,
         replicated_vv_size_b    = VV }) ->
-    io:format("Sync from node:~p to node:~p\n",[A,B]),
+    io:format("========== SYNC ==========\n"),
+    io:format("\t Node A:            \t ~p\n",[A]),
+    io:format("\t Node B:            \t ~p\n",[B]),
     io:format("\t Duration (micro):  \t ~p\n",[ET-ST]),
     io:format("\t Objects Transfers: \t ~p\n",[OL]),
     io:format("\t Objects Size:      \t ~p\n",[SOS]),

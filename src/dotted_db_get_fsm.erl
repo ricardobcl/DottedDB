@@ -89,17 +89,16 @@ waiting({ok, ReqID, Response}, State=#state{    req_id      = ReqID,
     {NewGoodAcks, NewAcks, MaybeError, NewReply} =
         case Response of
             {error, Error}  -> {GoodAcks  , Acks+1, Error    , Reply};
-            not_found       -> {GoodAcks+1, Acks+1, not_found, Reply};
-            _               -> {GoodAcks+1, Acks+1, not_error, dcc:sync(Response,Reply)}
+            _               -> {GoodAcks+1, Acks+1, no_error, dcc:sync(Response,Reply)}
         end,
     NewState = State#state{acks = NewAcks, good_acks = NewGoodAcks, reply = NewReply},
     % test if we have enough responses to respond to the client
     case NewGoodAcks >= ?R of
         true -> % we already have enough responses to acknowledge back to the client
-            case NewReply =:= dcc:new() of
-                true -> % no response found
-                    From ! {ReqID, not_found};
-                false -> % there an answer
+            case dcc:values(NewReply) =:= [] of
+                true -> % no response found; return the context for possibly future writes
+                    From ! {ReqID, not_found, dcc:context(NewReply)};
+                false -> % there is at least on value for this key
                     From ! {ReqID, ok, {dcc:values(NewReply), dcc:context(NewReply)}}
             end,
             {stop, normal, NewState};
