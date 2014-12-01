@@ -1,8 +1,8 @@
 %% -*- erlang -*-
 {application, dotted_db,
  [
-  {description, ""},
-  {vsn, "1"},
+  {description, "DottedDB:  a Distributed Key-Value Store with Global Logical Clocks"},
+  {vsn, "0.1.0"},
   {registered, []},
   {applications, [
                   kernel,
@@ -10,5 +10,5 @@
                   riak_core
                  ]},
   {mod, { dotted_db_app, []}},
-  {env, []}
+  {env, [{storage_backend, leveldb}]}
  ]}.

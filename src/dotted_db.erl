@@ -5,6 +5,7 @@
 
 -export([
          ping/0,
+         vstate/0,
          new_client/0,
          new_client/1,
          get/1,
@@ -18,14 +19,12 @@
          sync/0,
          sync_at_node/1,
          test/0,
-         test/1,
-         get_dbg_preflist/1,
-         get_dbg_preflist/2
+         test/1
         ]).
 
--ignore_xref([
-              ping/0
-             ]).
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+-endif.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%% PUBLIC API
@@ -39,6 +38,13 @@ ping() ->
     riak_core_vnode_master:sync_spawn_command(IndexNode, ping, dotted_db_vnode_master).
 
 
+%% @doc Get the state from a random vnode.
+vstate() ->
+    DocIdx = riak_core_util:chash_key({<<"get_vnode_state">>, term_to_binary(now())}),
+    PrefList = riak_core_apl:get_primary_apl(DocIdx, 1, dotted_db),
+    [{IndexNode, _Type}] = PrefList,
+    riak_core_vnode_master:sync_spawn_command(IndexNode, get_vnode_state, dotted_db_vnode_master).
+
 %% @doc Returns a pair with this module name and the local node().
 %% It can be used by client apps to connect to a DottedDB node and execute commands.
 new_client() ->
@@ -48,7 +54,6 @@ new_client(Node) ->
         pang -> {error, {could_not_reach_node, Node}};
         pong -> {ok, {?MODULE, Node}}
     end.
-
 
 
 
@@ -82,7 +87,7 @@ get(Key, {?MODULE, TargetNode}) ->
 %%% UPDATES -> PUTs & DELETEs
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-%% @doc
+%% @doc Writes a Key-Value pair. The causal context is optional.
 put(Key, Value) ->
     put(Key, Value, vv:new()).
 put(Key, Value, Context) ->
@@ -94,15 +99,10 @@ put_at_node(Key, Value, TargetNode) ->
 put_at_node(Key, Value, Context, TargetNode) ->
     put_del([Key, Value, Context, ?WRITE_OP], TargetNode).
 
-
-% delete(Key) ->
-%     delete(Key, vv:new()).
 delete(Key, Context) ->
     {ok, LocalNode} = new_client(),
     put_del([Key, undefined, Context, ?DELETE_OP], LocalNode).
 
-% delete_at_node(Key, TargetNode) ->
-%     delete_at_node(Key, vv:new(), TargetNode);
 delete_at_node(Key, Context, TargetNode) ->
     put_del([Key, undefined, Context, ?DELETE_OP], TargetNode).
 
@@ -127,12 +127,6 @@ put_del([Key, Value, Context, Operation], {?MODULE, TargetNode}) ->
 %%% SYNCHRONIZATION
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-%% @doc Forces a random anti-entropy synchronization between two random vnodes 
-%% from random nodes.
-% sync() ->
-%     % IdxNode = dotted_db_utils:random_index_node(),
-%     do_sync(IdxNode).
-
 %% @doc Forces a anti-entropy synchronization with a vnode from the local node 
 %% with another random vnode from a random node.
 sync() ->
@@ -141,7 +135,6 @@ sync() ->
 %% @doc Forces a anti-entropy synchronization with a vnode from the received node 
 %% with another random vnode from a random node.
 sync_at_node({?MODULE, TargetNode}) ->
-    % IdxNode = {_, TargetNode} = dotted_db_utils:random_index_from_node(TargetNode),
     Me = self(),
     ReqID = dotted_db_utils:make_request_id(),
     Request = [ReqID, Me],
@@ -188,10 +181,9 @@ test() ->
 
 
 
-
-%%%===================================================================
-%%% Internal Functions
-%%%===================================================================
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%  Internal Functions
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 wait_for_reqid(ReqID, Timeout) ->
     receive
@@ -216,22 +208,18 @@ decode_get_reply({BinValues, Context}) ->
 
 
 
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%% Unit Tests
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
+-ifdef(TEST).
 
+simple_test() ->
+    ok = application:start(lager),
+    ?assertNot(undefined == whereis(lager_sup)),
+    ok = application:start(riak_core),
+    ?assertNot(undefined == whereis(riak_core_sup)),
+    ok = application:start(dotted_db),
+    ?assertNot(undefined == whereis(dotted_db_sup)).
 
-
-
-
-
-get_dbg_preflist(Key) ->
-    DocIdx = riak_core_util:chash_key({<<"b">>,
-                                       list_to_binary(Key)}),
-    riak_core_apl:get_apl(DocIdx, ?N, dotted_db).
-
-get_dbg_preflist(Key, N) ->
-    IdxNode = lists:nth(N, get_dbg_preflist(Key)),
-    {ok, req_id, Val} =
-        riak_core_vnode_master:sync_command(IdxNode,
-                                            {get, req_id, Key},
-                                            dotted_db_vnode_master),
-    [IdxNode, Val].
+-endif.

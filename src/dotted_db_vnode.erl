@@ -16,7 +16,8 @@
          handle_handoff_data/2,
          encode_handoff_item/2,
          handle_coverage/4,
-         handle_exit/3]).
+         handle_exit/3
+        ]).
 
 -export([
          read/3,
@@ -31,6 +32,8 @@
              start_vnode/1
              ]).
 
+-type dets() :: reference().
+
 -record(state, {
         % node id used for in logical clocks
         id          :: id(),
@@ -39,15 +42,23 @@
         % node logical clock
         clock       :: bvv(),
         % key->value store, where the value is a DCC (values + logical clock)
-        objects     :: dotted_db_storage:storage(),
+        storage     :: dotted_db_storage:storage(),
         % what peer nodes have from my coordinated writes (not real-time)
         replicated  :: vv(),
         % log for keys that this node coordinated a write (eventually older keys are safely pruned)
-        keylog      :: keylog()
+        keylog      :: keylog(),
+        % number of updates (put or deletes) since saving node state to storage
+        updates_mem :: integer(),
+        % DETS table that stores in disk the vnode state
+        dets        :: dets()
     }).
 
 
 -define(MASTER, dotted_db_vnode_master).
+% save vnode state every 100 updates
+-define(UPDATE_LIMITE, 100).
+-define(VNODE_STATE_FILE, "dotted_db_vnode_state").
+-define(VNODE_STATE_KEY, "dotted_db_vnode_state_key").
 
 %%%===================================================================
 %%% API
@@ -101,29 +112,41 @@ sync_response(Node, ReqID, RemoteNodeID, RemoteNodeClockBase, MissingObjects) ->
 %%%===================================================================
 
 init([Index]) ->
-    DBName = "data/objects/" ++ integer_to_list(Index),
-    Backend = case app_helper:get_env(dotted_db, storage_backend) of
-        leveldb     -> {backend, leveldb};
-        ets         -> {backend, ets};
-        _SB         -> {backend, ets}
-    end,
-    {ok, Storage} = dotted_db_storage:open(DBName, [Backend]),
-    % get this node's peers, i.e., all nodes that replicates any subset of local keys
-    PeerIDs = [ ID || {ID, _Node} <- dotted_db_utils:peers(Index)],
-    % for replication factor N = 3, the numbers of peers should be 4 (2 vnodes before and 2 after)
-    (?N-1)*2 = length(PeerIDs),
-    Replicated = lists:foldl(fun (ID,VV) -> vv:add(VV,{ID,0}) end , vv:new(), PeerIDs),
-    (?N-1)*2 = length(Replicated),
-    S = #state{
-        id          = Index, % or {Index, node()},
+    % try to read the vnode state in the DETS file, if it exists
+    {Dets, NodeClock, KeyLog, Replicated} =
+        case read_vnode_state(Index) of
+            {Ref, not_found} -> % there isn't a past vnode state stored
+                lager:info("No persisted state for vnode ~p.",[Index]),
+                Clock = bvv:new(),
+                KLog  = {0,[]},
+                Repli = initialize_replicated(Index),
+                {Ref, Clock, KLog, Repli};
+            {Ref, error, Error} -> % some unexpected error
+                lager:error("Error reading vnode state from storage: ~p", [Error]),
+                % TODO: ideally, we should use a new vnode id.....
+                Clock = bvv:new(),
+                KLog  = {0,[]},
+                Repli = initialize_replicated(Index),
+                {Ref, Clock, KLog, Repli};
+            {Ref, {Clock, KLog, Repli}} -> % we have vnode state in the storage
+                lager:info("Recovered state for vnode ~p.",[Index]),
+                {Ref, Clock, KLog, Repli}
+        end,
+    % open the storage backend for the key-values of this vnode
+    Storage = open_storage(Index),
+    % create the state
+    {ok, #state{
+        % for now, lets use the index in the consistent hash as the vnode ID
+        id          = Index,
         index       = Index,
-        clock       = bvv:new(),
-        objects     = Storage,
+        clock       = NodeClock,
         replicated  = Replicated,
-        keylog      = {0,[]}
-    },
-    {ok, S}.
-
+        keylog      = KeyLog,
+        storage     = Storage,
+        dets = Dets,
+        updates_mem = 0
+        }
+    }.
 
 
 
@@ -133,7 +156,7 @@ init([Index]) ->
 
 handle_command({read, ReqID, Key}, _Sender, State) ->
     Response =
-        case dotted_db_storage:get(State#state.objects, Key) of
+        case dotted_db_storage:get(State#state.storage, Key) of
             {error, not_found} -> 
                 % there is no key K in this node
                 % create an empty "object" and fill its causality with the node clock
@@ -177,17 +200,28 @@ handle_command({write, ReqID, Operation, Key, Value, Context}, _Sender, State) -
     % check if the resulting object/DCC is empty (i.e. it was deleted and has no causal history)
     case StrippedDCC  =:= dcc:new() of
         true -> % we can safely remove this key from disk (distributed deletes done right :-))
-            ok = dotted_db_storage:delete(State#state.objects, Key);
+            ok = dotted_db_storage:delete(State#state.storage, Key);
         false -> % we still have relevant information (PUT or DELETE).
         % this can still be a client delete, if the DCC has causal information 
         % newer than the node clock; or its a normal PUT.
-            ok = dotted_db_storage:put(State#state.objects, Key, StrippedDCC)
+            ok = dotted_db_storage:put(State#state.storage, Key, StrippedDCC)
     end,
     % append the key to the tail of the key log
     {Base, Keys} = State#state.keylog,
     KeyLog = {Base, Keys ++ [Key]},
+    % increment the updates since saving
+    UpdatesMemory =  case State#state.updates_mem =< ?UPDATE_LIMITE of
+        true -> % it's still early to save to storage
+            State#state.updates_mem + 1;
+        false -> 
+            % it's time to persist vnode state
+            save_vnode_state(State#state.dets, State#state.id, {NodeClock, KeyLog, State#state.replicated}),
+            % restart the counter
+            0
+    end,
     % return the updated node state
-    {reply, {ok, ReqID, NewDCC}, State#state{clock = NodeClock, keylog = KeyLog}};
+    {reply, {ok, ReqID, NewDCC}, 
+        State#state{clock = NodeClock, keylog = KeyLog, updates_mem = UpdatesMemory}};
 
 
 handle_command({replicate, ReqID, Key, NewDCC}, _Sender, State) ->
@@ -196,8 +230,8 @@ handle_command({replicate, ReqID, Key, NewDCC}, _Sender, State) ->
     DiskDCC = guaranteed_get(Key, State),
     % synchronize both objects
     FinalDCC = dcc:sync(NewDCC, DiskDCC),
-    % save the new key DCC in the map, while stripping the unnecessary causality
-    ok = dotted_db_storage:put(State#state.objects, Key, dcc:strip(FinalDCC, NodeClock)),
+    % save the new key DCC, while stripping the unnecessary causality
+    ok = dotted_db_storage:put(State#state.storage, Key, dcc:strip(FinalDCC, NodeClock)),
     % return the updated node state
     {reply, {ok, ReqID}, State#state{clock = NodeClock}};
 
@@ -259,7 +293,7 @@ handle_command({sync_request, ReqID, RemoteID, RemoteEntry={Base,_Dots}}, _Sende
     % except the single dot for every concurrent value in the object.
     LocalStrippedObjects = [{Key, guaranteed_get(Key, State)} || Key <- RemovedKeys],
     % save the stripped versions of the keys that were removed from the keylog
-    [dotted_db_storage:put(State#state.objects, Key, dcc:strip(DCC, State#state.clock)) 
+    [dotted_db_storage:put(State#state.storage, Key, dcc:strip(DCC, State#state.clock)) 
         || {Key, DCC} <- LocalStrippedObjects],
     % get stats to return to the Sync FSM: {replicated vv, keylog, keylog length, b2a_number, b2a_size, b2a_size_full}
     FilledObjects = [{Key, dcc:fill(DCC, State#state.clock)} || {Key,DCC} <- RelevantMissingObjects],
@@ -289,7 +323,7 @@ handle_command({sync_response, ReqID, RespondingNodeID, RemoteNodeClockBase, Mis
     % synchronize / merge the remote and local objects
     SyncedObjects = [{ Key, dcc:sync(Remote, Local) } || {Key, Remote, Local} <- FilledObjects],
     % save the synced objects and strip their causal history
-    [dotted_db_storage:put(State#state.objects, Key, dcc:strip(DCC, State#state.clock)) 
+    [dotted_db_storage:put(State#state.storage, Key, dcc:strip(DCC, State#state.clock)) 
         || {Key, DCC} <- SyncedObjects],
     {reply, {ok, ReqID}, State#state{clock = NodeClock}};
 
@@ -297,6 +331,9 @@ handle_command({sync_response, ReqID, RespondingNodeID, RemoteNodeClockBase, Mis
 %% Sample command: respond to a ping
 handle_command(ping, _Sender, State) ->
     {reply, {pong, State#state.id}, State};
+
+handle_command(get_vnode_state, _Sender, State) ->
+    {reply, {pong, State}, State};
 
 handle_command(Message, _Sender, State) ->
     lager:warning({unhandled_command, Message}),
@@ -307,8 +344,11 @@ handle_command(Message, _Sender, State) ->
 %%% HANDOFF 
 %%%===================================================================
 
-handle_handoff_command(?FOLD_REQ{foldfun=Fun, acc0=Acc0}, _Sender, State) ->
-    Acc = dotted_db_storage:fold(State#state.objects, Fun, Acc0),
+handle_handoff_command(?FOLD_REQ{foldfun=FoldFun, acc0=Acc0}, _Sender, State) ->
+    % we need to wrap the fold function because it expect 3 elements (K,V,Acc),
+    % and our storage layer expect 2 elements ({K,V},Acc).
+    WrapperFun = fun({Key,Val}, Acc) -> FoldFun(Key, Val, Acc) end,
+    Acc = dotted_db_storage:fold(State#state.storage, WrapperFun, Acc0),
     {reply, Acc, State}.
 
 handoff_starting(_TargetNode, State) ->
@@ -321,17 +361,17 @@ handoff_finished(_TargetNode, State) ->
     {ok, State}.
 
 handle_handoff_data(Data, State) ->
-    {Key, Obj} = binary_to_term(Data),
+    {Key, Obj} = dotted_db_utils:decode_kv(Data),
     NewObj = guaranteed_get(Key, State),
     FinalObj = dcc:sync(Obj, NewObj),
-    ok = dotted_db_storage:put(State#state.objects, Key, dcc:strip(FinalObj, State#state.clock)),
+    ok = dotted_db_storage:put(State#state.storage, Key, dcc:strip(FinalObj, State#state.clock)),
     {reply, ok, State}.
 
 encode_handoff_item(Key, Val) ->
-    term_to_binary({Key,Val}).
+    dotted_db_utils:encode_kv({Key,Val}).
 
 is_empty(State) ->
-    Bool = dotted_db_storage:is_empty(State#state.objects),
+    Bool = dotted_db_storage:is_empty(State#state.storage),
     {Bool, State}.
 
 delete(State) ->
@@ -343,8 +383,11 @@ handle_coverage(_Req, _KeySpaces, _Sender, State) ->
 handle_exit(_Pid, _Reason, State) ->
     {noreply, State}.
 
-terminate(_Reason, _State) ->
+terminate(_Reason, State) ->
+    close_all(State),
     ok.
+
+
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% Private
@@ -355,7 +398,7 @@ terminate(_Reason, _State) ->
 % If the key does not exists or for some reason, the storage returns an 
 % error, return an empty DCC (also filled).
 guaranteed_get(Key, State) ->
-    case dotted_db_storage:get(State#state.objects, Key) of
+    case dotted_db_storage:get(State#state.storage, Key) of
         {error, not_found} -> 
             % there is no key K in this node
             dcc:fill(dcc:new(), State#state.clock);
@@ -369,4 +412,70 @@ guaranteed_get(Key, State) ->
             dcc:fill(DCC, State#state.clock)
     end.
 
+% @doc Saves the relevant vnode state to the storage.
+save_vnode_state(Dets, Id, State={_,_,_}) ->
+    Key = {?VNODE_STATE_KEY, Id},
+    ok = dets:insert(Dets, {Key, State}),
+    ok = dets:sync(Dets),
+    lager:info("Saved state for vnode ~p.",[Id]),
+    ok.
 
+% @doc Reads the relevant vnode state from the storage.
+read_vnode_state(Id) ->
+    Folder = "data/vnode_state/",
+    ok = filelib:ensure_dir(Folder),
+    FileName = filename:join(Folder, integer_to_list(Id)),
+    Ref = list_to_atom(integer_to_list(Id)),
+    {ok, Dets} = dets:open_file(Ref,[{type, set},
+                                    {file, FileName},
+                                    {auto_save, infinity},
+                                    {min_no_slots, 1}]),
+    Key = {?VNODE_STATE_KEY, Id},
+    case dets:lookup(Dets, Key) of
+        [] -> % there isn't a past vnode state stored
+            {Dets, not_found};
+        {error, Error} -> % some unexpected error
+            {Dets, error, Error};
+        [{Key, State={_,_,_}}] ->
+            {Dets, State}
+    end.
+
+% @doc Initializes the "replicated" version vector to 0 for peers of this vnode.
+initialize_replicated(Index) ->
+    % get this node's peers, i.e., all nodes that replicates any subset of local keys.
+    PeerIDs = [ ID || {ID, _Node} <- dotted_db_utils:peers(Index)],
+    % for replication factor N = 3, the numbers of peers should be 4 (2 vnodes before and 2 after).
+    (?N-1)*2 = length(PeerIDs),
+    % initialize the "replicated" version vector to 0 for all entries.
+    % this is vital, because we basically care for the minimum value in all entries,
+    % thus we require that every node peer must be present from the start.
+    Replicated = lists:foldl(fun (ID,VV) -> vv:add(VV,{ID,0}) end , vv:new(), PeerIDs),
+    (?N-1)*2 = length(Replicated),
+    Replicated.
+
+% @doc Returns the Storage for this vnode.
+open_storage(Index) ->
+    % get the preferred backend in the configuration file, defaulting to ETS if 
+    % there is no preference.
+    Backend = case app_helper:get_env(dotted_db, storage_backend) of
+        "leveldb"   -> {backend, leveldb};
+        "ets"       -> {backend, ets};
+        _           -> {backend, ets}
+    end,
+    lager:info("Using ~p for vnode ~p.",[Backend,Index]),
+    % give the name to the backend for this vnode using its position in the ring.
+    DBName = filename:join("data/objects/", integer_to_list(Index)),
+    {ok, Storage} = dotted_db_storage:open(DBName, [Backend]),
+    Storage.
+
+% @doc Close the key-value backend, save the vnode state and close the DETS file.
+close_all(undefined) -> ok;
+close_all(_State=#state{id          = Id,
+                        storage     = Storage,
+                        clock       = NodeClock,
+                        replicated  = Replicated,
+                        keylog      = KeyLog,
+                        dets        = Dets } ) ->
+    ok = dotted_db_storage:close(Storage),
+    ok = save_vnode_state(Dets, Id, {NodeClock, KeyLog, Replicated}),
+    ok = dets:close(Dets).

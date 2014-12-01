@@ -1,5 +1,6 @@
 *.beam
 .eunit
+.rebar
 deps/*
 ebin/*
 rel/dotted_db

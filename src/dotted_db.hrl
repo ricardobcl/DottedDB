@@ -9,7 +9,7 @@
 -define(WRITE_OP, write_op).
 
 
--type vv()     :: [{Key :: id(), Entry :: counter()}]. % orddict().
+-type vv()      :: [{Key :: id(), Entry :: counter()}]. % orddict().
 
 -type dcc()     :: {dots(), vv()}.
 
@@ -29,10 +29,10 @@
 % element of the consistent hashing ring
 -type index_node()  :: {index(), node()}.
 
--type keylog()  :: {counter(), [key()]}.
+-type keylog()      :: {counter(), [key()]}.
 
--type multi_ops() :: [{put, key(), value()}
-                    | {delete, key(), value()}].
+-type multi_ops()   :: [{put, key(), value()}
+                       |{delete, key(), value()}].
 
 -record(stats_sync, {
         % the node initiating the sync process

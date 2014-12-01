@@ -9,6 +9,12 @@ compile:
 deps:
 	$(REBAR) get-deps
 
+compile-no-deps:
+	$(REBAR) compile skip_deps=true
+
+test: compile
+	$(REBAR) eunit skip_deps=true
+
 clean:
 	$(REBAR) clean
 

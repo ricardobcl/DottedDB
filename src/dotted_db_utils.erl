@@ -10,43 +10,35 @@ make_request_id() ->
 
 -spec primary_node(key()) -> index_node().
 primary_node(Key) ->
-    DocIdx = get_DocIdx(Key),
+    DocIdx = riak_core_util:chash_key({?DEFAULT_BUCKET, Key}),
     {IndexNode, _Type}  = riak_core_apl:first_up(DocIdx, dotted_db),
     IndexNode.
 
 -spec replica_nodes(key()) -> [index_node()].
 replica_nodes(Key) ->
-    DocIdx = get_DocIdx(Key),
+    DocIdx = riak_core_util:chash_key({?DEFAULT_BUCKET, Key}),
     [IndexNode || {IndexNode, _Type} <- riak_core_apl:get_primary_apl(DocIdx, ?N, dotted_db)].
-
-get_DocIdx(Key) when is_binary(Key) ->
-    riak_core_util:chash_key({?DEFAULT_BUCKET, Key}).
-    
 
 -spec replica_nodes_indices(key()) -> [index()].
 replica_nodes_indices(Key) ->
     [Index || {Index,_Node} <- replica_nodes(Key)].
 
--spec get_node_from_index(index()) -> index_node().
-get_node_from_index(Index) ->
-    {ok, Ring} = riak_core_ring_manager:get_my_ring(),
-    Node = riak_core_ring:index_owner(Ring, Index),
-    {Index,Node}.
+% -spec get_node_from_index(index()) -> index_node().
+% get_node_from_index(Index) ->
+%     {ok, Ring} = riak_core_ring_manager:get_my_ring(),
+%     Node = riak_core_ring:index_owner(Ring, Index),
+%     {Index,Node}.
 
 -spec random_index_node() -> [index_node()].
 random_index_node() ->
-    {ok, Ring} = riak_core_ring_manager:get_my_ring(),
-    IndexNodes = riak_core_ring:all_owners(Ring),
+    % getting the binary consistent hash is more efficient since it lives in a ETS.
+    {ok, RingBin} = riak_core_ring_manager:get_chash_bin(),
+    IndexNodes = chashbin:to_list(RingBin),
     random_from_list(IndexNodes).
-
-% -spec random_index_from_node(node()) -> [index_node()].
-% random_index_from_node(TargetNode) ->
-%     {ok, Ring} = riak_core_ring_manager:get_my_ring(),
-%     IndexNodes = [{Idx,Node} || {Idx,Node} <- riak_core_ring:all_owners(Ring), Node =:= TargetNode],
-%     random_from_list(IndexNodes).
 
 -spec random_index_from_node(node()) -> [index_node()].
 random_index_from_node(TargetNode) ->
+    % getting the binary consistent hash is more efficient since it lives in a ETS.
     {ok, RingBin} = riak_core_ring_manager:get_chash_bin(),
     Filter = fun ({_Index, Owner}) -> Owner =:= TargetNode end,
     IndexNodes = chashbin:to_list_filter(Filter, RingBin),
@@ -61,9 +53,12 @@ peers(NodeIndex) ->
     peers(NodeIndex, ?N).
 -spec peers(index(), pos_integer()) -> [index_node()].
 peers(NodeIndex, N) ->
-    {ok, Ring} = riak_core_ring_manager:get_my_ring(),
+    % {ok, Ring} = riak_core_ring_manager:get_my_ring(),
+    % getting the binary consistent hash is more efficient since it lives in a ETS.
+    {ok, RingBin} = riak_core_ring_manager:get_chash_bin(),
+    Ring = chashbin:to_chash(RingBin),
     IndexBin = <<NodeIndex:160/integer>>,
-    Indices = riak_core_ring:preflist(IndexBin, Ring),
+    Indices = chash:successors(IndexBin, Ring),
     % PL = riak_core_ring:preflist(IndexBin, Ring),
     % Indices = [Idx || {Idx, _} <- PL],
     RevIndices = lists:reverse(Indices),
@@ -82,7 +77,6 @@ random_from_list(List) ->
     Index = random:uniform(length(List)),
     % return the element in that index
     lists:nth(Index,List).
-
 
 -spec encode_kv(term()) -> binary().
 encode_kv(Term) ->
