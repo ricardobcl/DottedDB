@@ -1,3 +1,5 @@
+-include_lib("glc/include/glc.hrl").
+
 -define(PRINT(Var), io:format("DEBUG: ~p:~p - ~p~n~n ~p~n~n", [?MODULE, ?LINE, ??Var, Var])).
 
 -define(DEFAULT_TIMEOUT, 10000).
@@ -7,21 +9,6 @@
 -define(DEFAULT_BUCKET, <<"g">>).
 -define(DELETE_OP, delete_op).
 -define(WRITE_OP, write_op).
-
-
--type vv()      :: [{Key :: id(), Entry :: counter()}]. % orddict().
-
--type dcc()     :: {dots(), vv()}.
-
--type bvv()     :: [{Key :: id(), Entry :: entry()}]. % orddict().
-
--type dots()    :: [{dot(), value()}]. % orddict(dot -> value).
--type dot()     :: {id(), counter()}.
--type entry()   :: {counter(), counter()}.
--type id()      :: term().
--type counter() :: non_neg_integer().
--type value()   :: any().
-
 
 -type key()         :: id().
 % index in the consistent hashing ring
