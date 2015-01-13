@@ -13,11 +13,21 @@ task :help do
   sh %{rake -T}
 end
 
+desc "make a binary release"
+task :rel do
+  sh "make rel" rescue "make error"
+end
+
 desc "install, start and join dotted_db nodes"
 task :dev => [:build, :start, :join, :converge]
 
 desc "compile the dotted_db source"
 task :compile do
+  sh "make compile-no-deps" rescue "make error"
+end
+
+desc "compile everything"
+task :all do
   sh "make all" rescue "make error"
 end
 
@@ -49,14 +59,31 @@ desc "waits for cluster vnode converge to stabilize"
 task :converge do
   puts "waiting for cluster vnode reshuffling to converge"
   $stdout.sync = true
-  res2 = `dev/dev1/bin/dotted_db-admin member-status | grep "\ \-\-" | wc -l`
-  while (res2.strip != NUM_NODES_STR)
+  cmd = `dev/dev1/bin/dotted_db-admin member-status | grep "\ \-\-" | wc -l`
+  cmd = `dev/dev1/bin/dotted_db-admin member-status | grep "\ \-\-" | wc -l`
+  counter = 1
+  tries = 0
+  continue = true
+  while (cmd.strip != NUM_NODES_STR and continue)
     print "."
     sleep(1)
-    res2 = `dev/dev1/bin/dotted_db-admin member-status | grep "\ \-\-" | wc -l`
+    cmd = `dev/dev1/bin/dotted_db-admin member-status | grep "\ \-\-" | wc -l`
+    counter = counter + 1
+    if counter > 10
+      sh %{dev/dev1/bin/dotted_db-admin member-status}
+      counter = 0
+      tries = tries + 1
+    end
+    if tries > 20
+      continue = false
+    end
   end
   sh %{dev/dev1/bin/dotted_db-admin member-status}
-  puts "READY SET GO!"
+  if continue 
+    puts "READY SET GO!"
+  else
+    puts "Cluster is not converging :("
+  end
 end
 
 desc "dotted_db-admin member-status"
@@ -75,7 +102,7 @@ task :stop do
 end
 
 desc "restart all dotted_db nodes"
-task :restart => [:stop, :start]
+task :restart => [:stop, :compile, :start]
 
 desc "clear data from all dotted_db nodes"
   task :clear => :stop do

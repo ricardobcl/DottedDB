@@ -1,7 +1,7 @@
 # DottedDB
 
 A prototype of a Dynamo-style distributed key-value database, implementing
-**Global Logical Clocks** as the main mechanism for causality across the system.
+**Global Logical Clocks** as the main causality mechanism across the system.
 
 ## Advantages
 
@@ -22,3 +22,24 @@ A prototype of a Dynamo-style distributed key-value database, implementing
 
 TODO
 
+## Building
+
+#### Note for Erlang 17+
+For erlang 17+, you have to remove `warnings_as_errors` from `rebar.config` in
+the following projects in the `deps` folder:
+
+* poolboy
+* meck
+* riak_core
+
+#### Normal release
+
+```shell
+> rake rel
+```
+
+#### 4 node dev cluster
+
+```shell
+> rake dev
+```

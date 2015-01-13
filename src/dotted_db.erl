@@ -9,7 +9,7 @@
          new_client/0,
          new_client/1,
          get/1,
-         get/2,
+         get_at_node/2,
          put/2,
          put/3,
          put_at_node/3,
@@ -22,9 +22,19 @@
          test/1
         ]).
 
--ifdef(TEST).
--include_lib("eunit/include/eunit.hrl").
--endif.
+% debug functions
+-export([
+         get_debug/1,
+         get_at_node_debug/2,
+         put_debug/2,
+         put_debug/3,
+         put_at_node_debug/3,
+         put_at_node_debug/4,
+         delete_debug/2,
+         delete_at_node_debug/3,
+         sync_debug/0,
+         sync_at_node_debug/1
+        ]).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%% PUBLIC API
@@ -64,12 +74,22 @@ new_client(Node) ->
 %% @doc Get a value from a key. If no target node is specified, use this node.
 get(Key) ->
     {ok, LocalNode} = new_client(),
-    get(Key, LocalNode).
-get(Key, {?MODULE, TargetNode}) ->
+    do_get(Key, LocalNode, false).
+
+get_debug(Key) ->
+    {ok, LocalNode} = new_client(),
+    do_get(Key, LocalNode, true).
+
+get_at_node(Key, Client) ->
+    do_get(Key, Client, false).
+
+get_at_node_debug(Key, Client) ->
+    do_get(Key, Client, true).
+
+do_get(Key, {?MODULE, TargetNode}, Debug) ->
     BinKey = dotted_db_utils:encode_kv(Key),
-    Me = self(),
     ReqID = dotted_db_utils:make_request_id(),
-    Request = [ReqID, Me, BinKey],
+    Request = [ReqID, self(), BinKey, Debug],
     case node() of
         % if this node is already the target node
         TargetNode ->
@@ -92,27 +112,48 @@ put(Key, Value) ->
     put(Key, Value, vv:new()).
 put(Key, Value, Context) ->
     {ok, LocalNode} = new_client(),
-    put_del([Key, Value, Context, ?WRITE_OP], LocalNode).
+    do_mutation([Key, Value, Context, ?WRITE_OP], LocalNode, false).
 
 put_at_node(Key, Value, TargetNode) ->
     put_at_node(Key, Value, vv:new(), TargetNode).
 put_at_node(Key, Value, Context, TargetNode) ->
-    put_del([Key, Value, Context, ?WRITE_OP], TargetNode).
+    do_mutation([Key, Value, Context, ?WRITE_OP], TargetNode, false).
 
 delete(Key, Context) ->
     {ok, LocalNode} = new_client(),
-    put_del([Key, undefined, Context, ?DELETE_OP], LocalNode).
+    do_mutation([Key, undefined, Context, ?DELETE_OP], LocalNode, false).
 
 delete_at_node(Key, Context, TargetNode) ->
-    put_del([Key, undefined, Context, ?DELETE_OP], TargetNode).
+    do_mutation([Key, undefined, Context, ?DELETE_OP], TargetNode, false).
+
+
+
+%% @doc Writes a Key-Value pair. The causal context is optional.
+put_debug(Key, Value) ->
+    put_debug(Key, Value, vv:new()).
+put_debug(Key, Value, Context) ->
+    {ok, LocalNode} = new_client(),
+    do_mutation([Key, Value, Context, ?WRITE_OP], LocalNode, true).
+
+put_at_node_debug(Key, Value, TargetNode) ->
+    put_at_node_debug(Key, Value, vv:new(), TargetNode).
+put_at_node_debug(Key, Value, Context, TargetNode) ->
+    do_mutation([Key, Value, Context, ?WRITE_OP], TargetNode, true).
+
+delete_debug(Key, Context) ->
+    {ok, LocalNode} = new_client(),
+    do_mutation([Key, undefined, Context, ?DELETE_OP], LocalNode, true).
+
+delete_at_node_debug(Key, Context, TargetNode) ->
+    do_mutation([Key, undefined, Context, ?DELETE_OP], TargetNode, true).
+
 
 % @doc Writes normal PUTs and DELETEs
-put_del([Key, Value, Context, Operation], {?MODULE, TargetNode}) ->
+do_mutation([Key, Value, Context, Operation], {?MODULE, TargetNode}, Debug) ->
     BinKey = dotted_db_utils:encode_kv(Key),
     BinValue = dotted_db_utils:encode_kv(Value),
-    Me = self(),
     ReqID = dotted_db_utils:make_request_id(),
-    Request = [ReqID, Me, Operation, BinKey, BinValue, Context],
+    Request = [ReqID, self(), Operation, BinKey, BinValue, Context, Debug],
     case node() of
         TargetNode ->
             dotted_db_put_fsm_sup:start_put_fsm(Request);
@@ -130,14 +171,22 @@ put_del([Key, Value, Context, Operation], {?MODULE, TargetNode}) ->
 %% @doc Forces a anti-entropy synchronization with a vnode from the local node 
 %% with another random vnode from a random node.
 sync() ->
-    sync_at_node({?MODULE, node()}).
+    do_sync({?MODULE, node()}, false).
+
+sync_at_node(Client) ->
+    do_sync(Client, false).
+
+sync_debug() ->
+    do_sync({?MODULE, node()}, true).
+
+sync_at_node_debug(Client) ->
+    do_sync(Client, true).
 
 %% @doc Forces a anti-entropy synchronization with a vnode from the received node 
 %% with another random vnode from a random node.
-sync_at_node({?MODULE, TargetNode}) ->
-    Me = self(),
+do_sync({?MODULE, TargetNode}, Debug) ->
     ReqID = dotted_db_utils:make_request_id(),
-    Request = [ReqID, Me],
+    Request = [ReqID, self(), Debug],
     case node() of
         TargetNode ->
             dotted_db_sync_fsm_sup:start_sync_fsm(Request);
@@ -146,14 +195,26 @@ sync_at_node({?MODULE, TargetNode}) ->
     end,
     wait_for_reqid(ReqID, ?DEFAULT_TIMEOUT).
     % {ok, Stats} = wait_for_reqid(ReqID, ?DEFAULT_TIMEOUT),
-    % stats:pp(Stats).
+    % dotted_db_utils:pp(Stats).
 
 
 
 
 
 test(N) ->
-    [test() || _ <- lists:seq(1,N)].
+    ok = dotted_db_stats:start(),
+    Nodes = [ 'dotted_db1@127.0.0.1','dotted_db2@127.0.0.1',
+                'dotted_db3@127.0.0.1','dotted_db4@127.0.0.1'],
+    Res = [new_client(Node) || Node <- Nodes],
+    Clients = [C || {ok, C} <- Res],
+    F = fun() -> 
+        Client = dotted_db_utils:random_from_list(Clients),
+        {ok, Stats1} = sync_at_node_debug(Client),
+        % io:format("\t Client:   \t ~p\n",[Client])
+        dotted_db_utils:pp(Stats1)
+    end,
+    [F() || _ <- lists:seq(1,N)],
+    ok = dotted_db_stats:stop().
 
 test() ->
     {not_found, _} = get("random_key"),
@@ -172,11 +233,11 @@ test() ->
     ok = delete(K1,Ctx2),
     Del = get(K1),
     {not_found, _Ctx3} = Del,
-    {ok, Stats1} = sync(),
-    stats:pp(Stats1),
-    {ok, Client} = new_client(),
-    {ok, Stats2} = sync_at_node(Client),
-    stats:pp(Stats2),
+    {ok, Stats1} = sync_debug(),
+    dotted_db_utils:pp(Stats1),
+    % {ok, Client} = new_client(),
+    % {ok, Stats2} = sync_at_node_debug(Client),
+    % dotted_db_utils:pp(Stats2),
     ok.
 
 
@@ -187,15 +248,26 @@ test() ->
 
 wait_for_reqid(ReqID, Timeout) ->
     receive
-        {ReqID, error, Error}       -> {error, Error};
+    %% Normal requests
+        {ReqID, error, Error}               -> {error, Error};
         % get
-        {ReqID, not_found, Context} -> {not_found, Context};
-        {ReqID, ok, Reply}          -> {ok, decode_get_reply(Reply)};
+        {ReqID, not_found, get, Context}    -> {not_found, Context};
+        {ReqID, ok, get, Reply}             -> {ok, decode_get_reply(Reply)};
         % put/delete
-        {ReqID, ok}                 -> ok;
-        {ReqID, timeout}            -> {error, timeout}
+        {ReqID, ok, putdel}                 -> ok;
+        {ReqID, timeout}                    -> {error, timeout};
+        % sync
+        {ReqID, ok, sync}                   -> ok;
+    %% Debug requests
+        % get
+        {ReqID, not_found, get, Context, Stats}         -> {not_found, Context, Stats};
+        {ReqID, ok, get, Reply, Stats}      -> {ok, decode_get_reply(Reply), Stats};
+        % put/delete
+        {ReqID, ok, putdel, Stats}          -> {ok, Stats};
+        % sync
+        {ReqID, ok, sync, Stats}            -> {ok, Stats}
     after Timeout ->
-            {error, timeout}
+        {error, timeout}
     end.
 
 
@@ -205,21 +277,3 @@ decode_get_reply({BinValues, Context}) ->
     Values = [ dotted_db_utils:decode_kv(BVal) || BVal <- BinValues ],
     {Values, Context}.
 
-
-
-
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%%% Unit Tests
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-
--ifdef(TEST).
-
-simple_test() ->
-    ok = application:start(lager),
-    ?assertNot(undefined == whereis(lager_sup)),
-    ok = application:start(riak_core),
-    ?assertNot(undefined == whereis(riak_core_sup)),
-    ok = application:start(dotted_db),
-    ?assertNot(undefined == whereis(dotted_db_sup)).
-
--endif.

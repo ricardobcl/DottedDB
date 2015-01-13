@@ -20,12 +20,12 @@
         ]).
 
 -export([
-         read/3,
-         write/6,
-         replicate/4,
-         sync_start/2,
-         sync_request/4,
-         sync_response/5
+         read/4,
+         write/7,
+         replicate/5,
+         sync_start/3,
+         sync_request/5,
+         sync_response/6
         ]).
 
 -ignore_xref([
@@ -68,41 +68,41 @@ start_vnode(I) ->
     riak_core_vnode_master:get_vnode_pid(I, ?MODULE).
 
 
-read(ReplicaNodes, ReqID, Key) ->
+read(ReplicaNodes, ReqID, Key, Debug) ->
     riak_core_vnode_master:command(ReplicaNodes,
-                                   {read, ReqID, Key},
+                                   {read, ReqID, Key, Debug},
                                    {fsm, undefined, self()},
                                    ?MASTER).
 
 
-write(Coordinator, ReqID, Op, Key, Value, Context) ->
+write(Coordinator, ReqID, Op, Key, Value, Context, Debug) ->
     riak_core_vnode_master:command(Coordinator,
-                                   {write, ReqID, Op, Key, Value, Context},
+                                   {write, ReqID, Op, Key, Value, Context, Debug},
                                    {fsm, undefined, self()},
                                    ?MASTER).
 
 
-replicate(ReplicaNodes, ReqID, Key, DCC) ->
+replicate(ReplicaNodes, ReqID, Key, DCC, Debug) ->
     riak_core_vnode_master:command(ReplicaNodes,
-                                   {replicate, ReqID, Key, DCC},
+                                   {replicate, ReqID, Key, DCC, Debug},
                                    {fsm, undefined, self()},
                                    ?MASTER).
 
-sync_start(Node, ReqID) ->
+sync_start(Node, ReqID, Debug) ->
     riak_core_vnode_master:command(Node,
-                                   {sync_start, ReqID},
+                                   {sync_start, ReqID, Debug},
                                    {fsm, undefined, self()},
                                    ?MASTER).
 
-sync_request(Peer, ReqID, RemoteNodeID, RemoteEntry) ->
+sync_request(Peer, ReqID, RemoteNodeID, RemoteEntry, Debug) ->
     riak_core_vnode_master:command(Peer,
-                                   {sync_request, ReqID, RemoteNodeID, RemoteEntry},
+                                   {sync_request, ReqID, RemoteNodeID, RemoteEntry, Debug},
                                    {fsm, undefined, self()},
                                    ?MASTER).
 
-sync_response(Node, ReqID, RemoteNodeID, RemoteNodeClockBase, MissingObjects) ->
+sync_response(Node, ReqID, RemoteNodeID, RemoteNodeClockBase, MissingObjects, Debug) ->
     riak_core_vnode_master:command(Node,
-                                   {sync_response, ReqID, RemoteNodeID, RemoteNodeClockBase, MissingObjects},
+                                   {sync_response, ReqID, RemoteNodeID, RemoteNodeClockBase, MissingObjects, Debug},
                                    {fsm, undefined, self()},
                                    ?MASTER).
 
@@ -116,7 +116,7 @@ init([Index]) ->
     {Dets, NodeClock, KeyLog, Replicated} =
         case read_vnode_state(Index) of
             {Ref, not_found} -> % there isn't a past vnode state stored
-                lager:info("No persisted state for vnode ~p.",[Index]),
+                lager:debug("No persisted state for vnode ~p.",[Index]),
                 Clock = bvv:new(),
                 KLog  = {0,[]},
                 Repli = initialize_replicated(Index),
@@ -129,7 +129,7 @@ init([Index]) ->
                 Repli = initialize_replicated(Index),
                 {Ref, Clock, KLog, Repli};
             {Ref, {Clock, KLog, Repli}} -> % we have vnode state in the storage
-                lager:info("Recovered state for vnode ~p.",[Index]),
+                lager:debug("Recovered state for vnode ~p.",[Index]),
                 {Ref, Clock, KLog, Repli}
         end,
     % open the storage backend for the key-values of this vnode
@@ -143,7 +143,7 @@ init([Index]) ->
         replicated  = Replicated,
         keylog      = KeyLog,
         storage     = Storage,
-        dets = Dets,
+        dets        = Dets,
         updates_mem = 0
         }
     }.
@@ -154,7 +154,7 @@ init([Index]) ->
 %%% READING
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-handle_command({read, ReqID, Key}, _Sender, State) ->
+handle_command({read, ReqID, Key, Debug}, _Sender, State) ->
     Response =
         case dotted_db_storage:get(State#state.storage, Key) of
             {error, not_found} -> 
@@ -171,7 +171,16 @@ handle_command({read, ReqID, Key}, _Sender, State) ->
                 % get and fill the causal history of the local object
                 dcc:fill(DCC, State#state.clock)
         end,
-    {reply, {ok, ReqID, Response}, State};
+    % Optionally get debug stats
+    Stats = case Debug of
+        true -> 
+            #{
+                % nodeA   => {State#state.id, node()},
+                % nodeB   => Peer
+            };
+        false -> #{}
+    end,
+    {reply, {ok, ReqID, Response, Stats}, State};
 
 
 
@@ -180,7 +189,7 @@ handle_command({read, ReqID, Key}, _Sender, State) ->
 %%% WRITING
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-handle_command({write, ReqID, Operation, Key, Value, Context}, _Sender, State) ->
+handle_command({write, ReqID, Operation, Key, Value, Context, Debug}, _Sender, State) ->
     % get and fill the causal history of the local key
     DiskDCC = guaranteed_get(Key, State),
     % discard obsolete values w.r.t the causal context
@@ -219,12 +228,24 @@ handle_command({write, ReqID, Operation, Key, Value, Context}, _Sender, State) -
             % restart the counter
             0
     end,
+    % Optionally get debug stats
+    Stats = case Debug of
+        true -> 
+            dotted_db_stats:notify(bvv_size, size(term_to_binary(NodeClock))),
+            {_, List1} = KeyLog,
+            dotted_db_stats:notify(kl_len, length(List1)),
+            #{
+                % nodeA   => {State#state.id, node()},
+                % nodeB   => Peer
+            };
+        false -> #{}
+    end,
     % return the updated node state
-    {reply, {ok, ReqID, NewDCC}, 
+    {reply, {ok, ReqID, NewDCC, Stats}, 
         State#state{clock = NodeClock, keylog = KeyLog, updates_mem = UpdatesMemory}};
 
 
-handle_command({replicate, ReqID, Key, NewDCC}, _Sender, State) ->
+handle_command({replicate, ReqID, Key, NewDCC, Debug}, _Sender, State) ->
     NodeClock = dcc:add(State#state.clock, NewDCC),
     % get and fill the causal history of the local key
     DiskDCC = guaranteed_get(Key, State),
@@ -232,8 +253,17 @@ handle_command({replicate, ReqID, Key, NewDCC}, _Sender, State) ->
     FinalDCC = dcc:sync(NewDCC, DiskDCC),
     % save the new key DCC, while stripping the unnecessary causality
     ok = dotted_db_storage:put(State#state.storage, Key, dcc:strip(FinalDCC, NodeClock)),
+    % Optionally get debug stats
+    Stats = case Debug of
+        true -> 
+            #{
+                % nodeA   => {State#state.id, node()},
+                % nodeB   => Peer
+            };
+        false -> #{}
+    end,
     % return the updated node state
-    {reply, {ok, ReqID}, State#state{clock = NodeClock}};
+    {reply, {ok, ReqID, Stats}, State#state{clock = NodeClock}};
 
 
 
@@ -242,20 +272,28 @@ handle_command({replicate, ReqID, Key, NewDCC}, _Sender, State) ->
 %%% SYNCHRONIZING
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-handle_command({sync_start, ReqID}, _Sender, State) ->
+handle_command({sync_start, ReqID, Debug}, _Sender, State) ->
     % get this node's peers, i.e., all nodes that replicates any subset of local keys
     Peers = dotted_db_utils:peers(State#state.index),
     % choose a random node from that list
     Peer = {Index,_Node} = dotted_db_utils:random_from_list(Peers),
     % get the "Peer"'s entry from this node clock 
     RemoteEntry = bvv:get(Index, State#state.clock),
-    % get stats to return to the Sync FSM: {node a, node b}
-    Stats = {{State#state.id, node()}, Peer},
+    % Optionally get debug stats
+    Stats = case Debug of
+        true -> 
+            #{
+                nodeA   => {State#state.id, node()},
+                nodeB   => Peer,
+                peers   => Peers
+            };
+        false -> #{}
+    end,
     %send a sync message to that node
     {reply, {ok, ReqID, Peer, State#state.id, RemoteEntry, Stats}, State};
 
 
-handle_command({sync_request, ReqID, RemoteID, RemoteEntry={Base,_Dots}}, _Sender, State) ->
+handle_command({sync_request, ReqID, RemoteID, RemoteEntry={Base,_Dots}, Debug}, _Sender, State) ->
     % get the all the dots (only the counters) from the local node clock, with id equal to the local node
     LocalDots = bvv:values(bvv:get(State#state.id, State#state.clock)),
     % get the all the dots (only the counters) from the asking node clock, with id equal to the local node
@@ -298,22 +336,33 @@ handle_command({sync_request, ReqID, RemoteID, RemoteEntry={Base,_Dots}}, _Sende
     % get stats to return to the Sync FSM: {replicated vv, keylog, keylog length, b2a_number, b2a_size, b2a_size_full}
     FilledObjects = [{Key, dcc:fill(DCC, State#state.clock)} || {Key,DCC} <- RelevantMissingObjects],
     {B1,K1} = KeyLog,
-    Stats = {
-        size(term_to_binary(Replicated)),
-        size(term_to_binary(KeyLog)),
-        length(K1) + B1,
-        length(StrippedObjects),
-        size(term_to_binary(StrippedObjects)),
-        size(term_to_binary(FilledObjects))
-    },
+    % Optionally get debug stats
+    Stats = case Debug of
+        true ->
+            dotted_db_stats:notify(bvv_size, size(term_to_binary(State#state.clock))),
+            dotted_db_stats:notify(kl_len, length(K1)),
+            #{
+                b2a_number              => length(StrippedObjects),
+                b2a_size                => size(term_to_binary(StrippedObjects)),
+                b2a_size_full           => size(term_to_binary(FilledObjects)),
+                keylog_length_b         => length(K1) + B1,
+                keylog_size_b           => size(term_to_binary(KeyLog)),
+                replicated_vv_size_b    => size(term_to_binary(Replicated)),
+                vv_b                    => Replicated,
+                kl_b                    => {B1, length(K1)},
+                bvv_b                   => State#state.clock,
+                rem_entry               => RemoteEntry
+            };
+        false -> #{}
+    end,
     % send the final objects and the base (contiguous) dots of the node clock to the asking node
     {reply, {ok, ReqID, State#state.id, bvv:base(State#state.clock), StrippedObjects, Stats},
         State#state{replicated = Replicated, keylog = KeyLog}};
 
-handle_command({sync_response, ReqID, RespondingNodeID, RemoteNodeClockBase, MissingObjects}, _Sender, State) ->
+handle_command({sync_response, ReqID, RespondingNodeID, RemoteNodeClockBase, MissingObjects, Debug}, _Sender, State) ->
     % replace the current entry in the node clock for the responding clock with
     % the current knowledge it's receiving
-    RemoteEntry = bvv:get(RespondingNodeID, RemoteNodeClockBase),
+    RemoteEntry = {_,0} = bvv:get(RespondingNodeID, RemoteNodeClockBase),
     NodeClock = bvv:store_entry(RespondingNodeID, RemoteEntry, State#state.clock),
     % get the local objects corresponding to the received objects and fill the 
     % causal history for all of them
@@ -323,9 +372,20 @@ handle_command({sync_response, ReqID, RespondingNodeID, RemoteNodeClockBase, Mis
     % synchronize / merge the remote and local objects
     SyncedObjects = [{ Key, dcc:sync(Remote, Local) } || {Key, Remote, Local} <- FilledObjects],
     % save the synced objects and strip their causal history
-    [dotted_db_storage:put(State#state.storage, Key, dcc:strip(DCC, State#state.clock)) 
+    [dotted_db_storage:put(State#state.storage, Key, dcc:strip(DCC, State#state.clock))
         || {Key, DCC} <- SyncedObjects],
-    {reply, {ok, ReqID}, State#state{clock = NodeClock}};
+    % Optionally get debug stats
+    Stats = case Debug of
+        true ->
+            #{
+                % nodeA   => {State#state.id, node()},
+                % nodeB   => Peer
+            };
+        false -> #{}
+    end,
+    {reply, {ok, ReqID, Stats}, State#state{clock = NodeClock}};
+
+
 
 
 %% Sample command: respond to a ping
@@ -417,7 +477,7 @@ save_vnode_state(Dets, Id, State={_,_,_}) ->
     Key = {?VNODE_STATE_KEY, Id},
     ok = dets:insert(Dets, {Key, State}),
     ok = dets:sync(Dets),
-    lager:info("Saved state for vnode ~p.",[Id]),
+    lager:debug("Saved state for vnode ~p.",[Id]),
     ok.
 
 % @doc Reads the relevant vnode state from the storage.
@@ -462,7 +522,7 @@ open_storage(Index) ->
         "ets"       -> {backend, ets};
         _           -> {backend, ets}
     end,
-    lager:info("Using ~p for vnode ~p.",[Backend,Index]),
+    lager:debug("Using ~p for vnode ~p.",[Backend,Index]),
     % give the name to the backend for this vnode using its position in the ring.
     DBName = filename:join("data/objects/", integer_to_list(Index)),
     {ok, Storage} = dotted_db_storage:open(DBName, [Backend]),

@@ -30,7 +30,7 @@ relclean:
 xref: all
 	$(REBAR) skip_deps=true xref
 
-stage : rel
+stage: rel
 	$(foreach dep,$(wildcard deps/*), rm -rf rel/dotted_db/lib/$(shell basename $(dep))-* && ln -sf $(abspath $(dep)) rel/dotted_db/lib;)
 	$(foreach app,$(wildcard apps/*), rm -rf rel/dotted_db/lib/$(shell basename $(app))-* && ln -sf $(abspath $(app)) rel/dotted_db/lib;)
 

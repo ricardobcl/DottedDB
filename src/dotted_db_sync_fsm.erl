@@ -4,7 +4,7 @@
 -include("dotted_db.hrl").
 
 %% API
--export([start_link/2]).
+-export([start_link/3]).
 
 %% Callbacks
 -export([init/1, code_change/4, handle_event/3, handle_info/3,
@@ -23,15 +23,16 @@
     index_node      :: index_node(),
     peer            :: index_node(),
     timeout         :: non_neg_integer(),
-    stats           :: stats_sync()
+    debug           :: boolean(),
+    stats           :: #{}
 }).
 
 %%%===================================================================
 %%% API
 %%%===================================================================
 
-start_link(ReqID, From) ->
-    gen_fsm:start_link(?MODULE, [ReqID, From], []).
+start_link(ReqID, From, Debug) ->
+    gen_fsm:start_link(?MODULE, [ReqID, From, Debug], []).
 
 
 %%%===================================================================
@@ -39,7 +40,7 @@ start_link(ReqID, From) ->
 %%%===================================================================
 
 %% @doc Initialize the state data.
-init([ReqID, From]) ->
+init([ReqID, From, Debug]) ->
     ThisNode = node(),
     IdxNode = {_, ThisNode} = dotted_db_utils:random_index_from_node(ThisNode),
     SD = #state{
@@ -47,36 +48,46 @@ init([ReqID, From]) ->
         from        = From,
         index_node  = IdxNode,
         peer        = undefined,
-        timeout     = ?DEFAULT_TIMEOUT * 20, % sync is much slower than PUTs/GETs
-        stats       = stats:new_sync()
+        timeout     = ?DEFAULT_TIMEOUT * 20, % sync is much slower than PUTs/GETs,
+        debug       = Debug,
+        stats       = #{}
     },
     {ok, sync_start, SD, 0}.
 
 %% @doc 
 sync_start(timeout, State=#state{   req_id      = ReqID,
-                                    index_node  = IdxNode,
-                                    stats       = Stats}) ->
-    Stats2 = stats:start_sync(Stats),
-    dotted_db_vnode:sync_start([IdxNode], ReqID),
-    {next_state, sync_request, State#state{stats=Stats2}, State#state.timeout}.
+                                    debug       = Debug,
+                                    index_node  = IdxNode}) ->
+    Stats = case Debug of 
+        true -> #{}; %dotted_db_stats:start();
+        false -> #{}
+    end,
+    dotted_db_vnode:sync_start([IdxNode], ReqID, Debug),
+    {next_state, sync_request, State#state{stats=Stats}, State#state.timeout}.
 
 %% @doc 
-sync_request({ok, ReqID, Peer, RemoteNodeID, RemoteEntry, _Stats={NodeA, NodeB}}, State) ->
-    Stats = stats:nodes(State#state.stats, NodeA, NodeB),
-    dotted_db_vnode:sync_request(Peer, ReqID, RemoteNodeID, RemoteEntry),
-    {next_state, sync_response, State#state{peer=Peer,stats=Stats}, State#state.timeout}.
+sync_request({ok, ReqID, Peer, RemoteNodeID, RemoteEntry, Stats}, State) ->
+    Stats2 = maps:merge(State#state.stats, Stats),
+    dotted_db_vnode:sync_request(Peer, ReqID, RemoteNodeID, RemoteEntry, State#state.debug),
+    {next_state, sync_response, State#state{peer=Peer,stats=Stats2}, State#state.timeout}.
 
 %% @doc 
 sync_response({ok, ReqID, RemoteNodeID, RemoteNodeClockBase, MissingObjects, Stats}, State) ->
-    Stats2 = stats:sync_req(State#state.stats, Stats),
-    dotted_db_vnode:sync_response(
-            [State#state.index_node], ReqID, RemoteNodeID, RemoteNodeClockBase, MissingObjects),
+    Stats2 = maps:merge(State#state.stats, Stats),
+    dotted_db_vnode:sync_response( [State#state.index_node],
+        ReqID, RemoteNodeID, RemoteNodeClockBase, MissingObjects, State#state.debug),
     {next_state, sync_ack, State#state{stats=Stats2}, State#state.timeout}.
 
 %% @doc 
-sync_ack({ok, ReqID}, State) ->
-    Stats = stats:end_sync(State#state.stats),
-    State#state.from ! {ReqID, ok, {sync, Stats}},
+sync_ack({ok, ReqID, Stats}, State) ->
+    case State#state.debug of
+        true ->
+            Stats3 = maps:merge(State#state.stats, Stats),
+            % Stats3 = dotted_db_stats:stop(Stats2),
+            State#state.from ! {ReqID, ok, sync, Stats3};
+        false ->
+            State#state.from ! {ReqID, ok, sync}
+    end,
     {stop, normal, State}.
 
 

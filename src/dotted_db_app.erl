@@ -18,6 +18,8 @@ start(_StartType, _StartArgs) ->
             ok = riak_core_node_watcher_events:add_guarded_handler(dotted_db_node_event_handler, []),
             ok = riak_core_node_watcher:service_up(dotted_db, self()),
 
+            {ok,_} = dotted_db_stats:start_link([bvv_size, kl_len]),
+
             % EntryRoute = {["dotted_db", "ping", client], dotted_db_wm_ping, []},
             % webmachine_router:add_route(EntryRoute),
 

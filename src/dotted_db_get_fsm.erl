@@ -6,7 +6,7 @@
 -include("dotted_db.hrl").
 
 %% API
--export([start_link/3]).
+-export([start_link/4]).
 
 %% Callbacks
 -export([init/1, code_change/4, handle_event/3, handle_info/3,
@@ -24,7 +24,8 @@
     good_acks   :: non_neg_integer(),
     reply       :: dcc(),
     timeout     :: non_neg_integer(),
-    stats       :: stats_reqs()
+    debug       :: boolean(),
+    stats       :: #{}
 }).
 
 %%%===================================================================
@@ -35,15 +36,15 @@
 %     dotted_db_get_fsm_sup:start_get_fsm([ReqID, From, Key]),
 %     {ok, ReqID}.
 
-start_link(ReqID, From, Key) ->
-    gen_fsm:start_link(?MODULE, [ReqID, From, Key], []).
+start_link(ReqID, From, Key, Debug) ->
+    gen_fsm:start_link(?MODULE, [ReqID, From, Key, Debug], []).
 
 %%%===================================================================
 %%% States
 %%%===================================================================
 
 %% Initialize state data.
-init([ReqId, From, Key]) ->
+init([ReqId, From, Key, Debug]) ->
     SD = #state{req_id      = ReqId,
                 from        = From,
                 key         = Key,
@@ -51,7 +52,10 @@ init([ReqId, From, Key]) ->
                 acks        = 0,
                 good_acks   = 0,
                 reply       = dcc:new(),
-                timeout     = ?DEFAULT_TIMEOUT},
+                timeout     = ?DEFAULT_TIMEOUT,
+                debug       = Debug,
+                stats       = #{}
+    },
     {ok, execute, SD, 0}.
 
 % %% @doc Calculate the Replica Nodes.
@@ -63,10 +67,15 @@ init([ReqId, From, Key]) ->
 %% @doc Execute the get reqs.
 execute(timeout, State=#state{  req_id      = ReqId,
                                 key         = Key,
+                                debug       = Debug,
                                 replicas    = ReplicaNodes}) ->
+    Stats = case Debug of 
+        true -> #{}; %dotted_db_stats:start();
+        false -> #{}
+    end,
     % request this key from nodes that store it (ReplicaNodes)
-    dotted_db_vnode:read(ReplicaNodes, ReqId, Key),
-    {next_state, waiting, State}.
+    dotted_db_vnode:read(ReplicaNodes, ReqId, Key, Debug),
+    {next_state, waiting, State#state{stats=Stats}}.
 
 %% @doc Wait for W-1 write acks. Timeout is 5 seconds by default (see dotted_db.hrl).
 waiting(timeout, State=#state{  req_id      = ReqID,
@@ -75,11 +84,17 @@ waiting(timeout, State=#state{  req_id      = ReqID,
     From ! {ReqID, timeout},
     {stop, timeout, State};
 
-waiting({ok, ReqID, Response}, State=#state{    req_id      = ReqID,
+waiting({ok, ReqID, Response, NewStats}, State=#state{    req_id      = ReqID,
                                                 from        = From,
                                                 reply       = Reply,
                                                 acks        = Acks,
+                                                stats       = Stats,
+                                                debug       = Debug,
                                                 good_acks   = GoodAcks}) ->
+    Stats2 = case Debug of 
+        true -> maps:merge(NewStats, Stats);
+        false -> #{}
+    end,
     % synchronize with the current object, or don't if the response is not_found
     % not_found still counts as a valid response
     {NewGoodAcks, NewAcks, MaybeError, NewReply} =
@@ -87,17 +102,28 @@ waiting({ok, ReqID, Response}, State=#state{    req_id      = ReqID,
             {error, Error}  -> {GoodAcks  , Acks+1, Error    , Reply};
             _               -> {GoodAcks+1, Acks+1, no_error, dcc:sync(Response,Reply)}
         end,
-    NewState = State#state{acks = NewAcks, good_acks = NewGoodAcks, reply = NewReply},
+    NewState = State#state{acks = NewAcks, good_acks = NewGoodAcks, reply = NewReply, stats=Stats2},
     % test if we have enough responses to respond to the client
     case NewGoodAcks >= ?R of
         true -> % we already have enough responses to acknowledge back to the client
-            case dcc:values(NewReply) =:= [] of
-                true -> % no response found; return the context for possibly future writes
-                    From ! {ReqID, not_found, dcc:context(NewReply)};
-                false -> % there is at least on value for this key
-                    From ! {ReqID, ok, {dcc:values(NewReply), dcc:context(NewReply)}}
+            {NewState2, Stats3} = case Debug of 
+                true -> 
+                    % Stats0 = dotted_db_stats:stop(Stats2),
+                    {NewState#state{stats=Stats2}, Stats2};
+                false -> 
+                    {NewState, #{}}
             end,
-            {stop, normal, NewState};
+            case {dcc:values(NewReply) =:= [], Debug} of
+                {true, false} -> % no response found; return the context for possibly future writes
+                    From ! {ReqID, not_found, get, dcc:context(NewReply)};
+                {false, false} -> % there is at least on value for this key
+                    From ! {ReqID, ok, get, {dcc:values(NewReply), dcc:context(NewReply)}};
+                {true, true} -> % no response found; return the context for possibly future writes
+                    From ! {ReqID, not_found, get, dcc:context(NewReply), Stats3};
+                {false, true} -> % there is at least on value for this key
+                    From ! {ReqID, ok, get, {dcc:values(NewReply), dcc:context(NewReply)}, Stats3}
+            end,
+            {stop, normal, NewState2};
         false -> % we still need more (good) responses
             case NewAcks >= ?N of
                 true  -> % not enough good nodes responded, return error
