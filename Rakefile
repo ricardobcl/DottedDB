@@ -69,12 +69,14 @@ task :converge do
     sleep(1)
     cmd = `dev/dev1/bin/dotted_db-admin member-status | grep "\ \-\-" | wc -l`
     counter = counter + 1
-    if counter > 10
-      sh %{dev/dev1/bin/dotted_db-admin member-status}
-      counter = 0
+    if counter > 5
       tries = tries + 1
+      puts ""
+      puts "Try # #{tries} of 20"
+      sh %{dev/dev1/bin/dotted_db-admin member-status}
+      counter = 1
     end
-    if tries > 20
+    if tries > 39
       continue = false
     end
   end

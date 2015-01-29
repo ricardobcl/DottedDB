@@ -37,6 +37,10 @@ init(_Args) ->
                {dotted_db_sync_fsm_sup, start_link, []},
                permanent, infinity, supervisor, [dotted_db_sync_fsm_sup]},
 
+    CoverageFSMs = {dotted_db_coverage_fsm_sup,
+                    {dotted_db_coverage_fsm_sup, start_link, []},
+                    permanent, infinity, supervisor, [dotted_db_coverage_fsm_sup]},
+
     { ok,
         { {one_for_one, 5, 10},
-          [VMaster, WriteFSMs, GetFSMs, SyncFSMs]}}.
+          [VMaster, WriteFSMs, GetFSMs, SyncFSMs, CoverageFSMs]}}.
