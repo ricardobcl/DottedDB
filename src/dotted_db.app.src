@@ -10,5 +10,5 @@
                   riak_core
                  ]},
   {mod, { dotted_db_app, []}},
-  {env, [{storage_backend, leveldb}]}
+  {env, [{storage_backend, "leveldb"}]}
  ]}.
