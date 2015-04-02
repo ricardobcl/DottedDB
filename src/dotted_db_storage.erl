@@ -46,17 +46,20 @@ destroy(Engine) ->
 %% @doc get the value associated to the key
 -spec get(storage(), key()) -> any() | {error, term()}.
 get(Engine, Key) ->
-    rkvs:get(Engine, Key).
+    BKey = dotted_db_utils:encode_kv(Key),
+    rkvs:get(Engine, BKey).
 
 %% @doc store the value associated to the key.
 -spec put(storage(), key(), value()) -> ok | {error, term()}.
 put(Engine, Key, Value) ->
-    rkvs:put(Engine, Key, Value).
+    BKey = dotted_db_utils:encode_kv(Key),
+    rkvs:put(Engine, BKey, Value).
 
 %% @doc delete the value associated to the key
 -spec delete(storage(), key()) -> ok | {error, term()}.
 delete(Engine, Key) ->
-    rkvs:clear(Engine, Key).
+    BKey = dotted_db_utils:encode_kv(Key),
+    rkvs:clear(Engine, BKey).
 
 %% @doc do multiple operations on the backend.
 -spec write_batch(storage(), multi_ops()) -> ok | {error, term()}.

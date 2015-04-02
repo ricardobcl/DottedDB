@@ -6,3 +6,5 @@ ebin/*
 rel/dotted_db
 dev
 apps/dotted_db/src/*
+.idea/*
+DottedDB.iml

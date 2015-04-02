@@ -13,6 +13,31 @@ task :help do
   sh %{rake -T}
 end
 
+desc "counters # of errors lines in the dev cluster log"
+task :errors do
+  sh "cat dev/dev?/log/error.log dev/dev?/log/crash.log| wc -l" rescue "print errors error"
+  sh "cat dev/dev1/log/error.log dev/dev1/log/crash.log| wc -l" rescue "print errors error"
+  sh "cat dev/dev2/log/error.log dev/dev2/log/crash.log| wc -l" rescue "print errors error"
+  sh "cat dev/dev3/log/error.log dev/dev3/log/crash.log| wc -l" rescue "print errors error"
+  sh "cat dev/dev4/log/error.log dev/dev4/log/crash.log| wc -l" rescue "print errors error"
+end
+
+desc "resets the errors and crash logs"
+task :clean_errors do
+  sh "rm -f dev/dev?/log/error.log dev/dev?/log/crash.log"
+  sh "touch dev/dev1/log/error.log dev/dev1/log/crash.log" rescue "print clean error"
+  sh "touch dev/dev2/log/error.log dev/dev2/log/crash.log" rescue "print clean error"
+  sh "touch dev/dev3/log/error.log dev/dev3/log/crash.log" rescue "print clean error"
+  sh "touch dev/dev4/log/error.log dev/dev4/log/crash.log" rescue "print clean error"
+end
+
+desc "attach to a dottedDB console"
+task :attach, :node do |t, args|
+  args.with_defaults(:node => 1)
+  sh %{dev/dev#{args.node}/bin/dotted_db attach} rescue "attach error"
+end
+
+
 desc "make a binary release"
 task :rel do
   sh "make rel" rescue "make error"
@@ -38,9 +63,10 @@ end
 
 desc "start all dotted_db nodes"
 task :start do
-  (1..NUM_NODES).each do |n|
-    sh %{dev/dev#{n}/bin/dotted_db start}
-  end
+  # (1..NUM_NODES).each do |n|
+  #   sh %{dev/dev#{n}/bin/dotted_db start}
+  # end
+  sh "for d in dev/dev*; do $d/bin/dotted_db start; done" rescue "not running"
   puts "========================================"
   puts "Dotted Dev Cluster started"
   puts "========================================"
@@ -81,7 +107,7 @@ task :converge do
     end
   end
   sh %{dev/dev1/bin/dotted_db-admin member-status}
-  if continue 
+  if continue
     puts "READY SET GO!"
   else
     puts "Cluster is not converging :("
@@ -95,9 +121,10 @@ end
 
 desc "stop all dotted_db nodes"
 task :stop do
-  (1..NUM_NODES).each do |n|
-    sh %{dev/dev#{n}/bin/dotted_db stop} rescue "not running"
-  end
+  # (1..NUM_NODES).each do |n|
+  #   sh %{dev/dev#{n}/bin/dotted_db stop} rescue "not running"
+  # end
+  sh "for d in dev/dev*; do $d/bin/dotted_db stop; done" rescue "not running"
   puts "========================================"
   puts "Dotted Dev Cluster stopped"
   puts "========================================"

@@ -17,7 +17,7 @@ primary_node(Key) ->
 -spec replica_nodes(key()) -> [index_node()].
 replica_nodes(Key) ->
     DocIdx = riak_core_util:chash_key({?DEFAULT_BUCKET, Key}),
-    [IndexNode || {IndexNode, _Type} <- riak_core_apl:get_primary_apl(DocIdx, ?N, dotted_db)].
+    [IndexNode || {IndexNode, _Type} <- riak_core_apl:get_primary_apl(DocIdx, ?REPLICATION_FACTOR, dotted_db)].
 
 -spec replica_nodes_indices(key()) -> [index()].
 replica_nodes_indices(Key) ->
@@ -36,21 +36,19 @@ random_index_node() ->
     IndexNodes = chashbin:to_list(RingBin),
     random_from_list(IndexNodes).
 
--spec random_index_from_node(node()) -> [index_node()].
-random_index_from_node(TargetNode) ->
+-spec vnodes_from_node(node()) -> [index_node()].
+vnodes_from_node(TargetNode) ->
     % getting the binary consistent hash is more efficient since it lives in a ETS.
     {ok, RingBin} = riak_core_ring_manager:get_chash_bin(),
     Filter = fun ({_Index, Owner}) -> Owner =:= TargetNode end,
-    IndexNodes = chashbin:to_list_filter(Filter, RingBin),
-    random_from_list(IndexNodes).
-
+    chashbin:to_list_filter(Filter, RingBin).
 
 %% @doc Returns the nodes that also replicate a subset of keys from some node "NodeIndex".
 %% We are assuming a consistent hashing ring, thus we return the N-1 before this node in the
 %% ring and the next N-1.
 -spec peers(index()) -> [index()].
 peers(NodeIndex) ->
-    peers(NodeIndex, ?N).
+    peers(NodeIndex, ?REPLICATION_FACTOR).
 -spec peers(index(), pos_integer()) -> [index_node()].
 peers(NodeIndex, N) ->
     % {ok, Ring} = riak_core_ring_manager:get_my_ring(),
@@ -77,6 +75,21 @@ random_from_list(List) ->
     Index = random:uniform(length(List)),
     % return the element in that index
     lists:nth(Index,List).
+
+%% @doc Returns a random element from a given list.
+-spec random_sublist([any()], integer()) -> [any()].
+random_sublist(List, N) ->
+    % Properly seeding the process.
+    <<A:32, B:32, C:32>> = crypto:rand_bytes(12),
+    random:seed({A,B,C}),
+    % Assign a random value for each element in the list.
+    List1 = [{random:uniform(), E} || E <- List],
+    % Sort by the random number.
+    List2 = lists:sort(List1),
+    % Take the first N elements.
+    List3 = lists:sublist(List2, N),
+    % Remove the random numbers.
+    [ E || {_,E} <- List3].
 
 -spec encode_kv(term()) -> binary().
 encode_kv(Term) ->
@@ -131,4 +144,10 @@ pp(M) ->
 %     {Mega,Sec,Micro} = os:timestamp(),
 %     % (Mega * 1000000) + Sec + (Micro / 1000000).
 %     Mega * 1000000 * 1000000 + Sec * 1000000 + Micro.
+
+
+human_filesize(Size) -> human_filesize(Size, ["B","KB","MB","GB","TB","PB"]).
+human_filesize(S, [_|[_|_] = L]) when S >= 1024 -> human_filesize(S/1024, L);
+human_filesize(S, [M|_]) ->
+    lists:flatten(io_lib:format("~.2f ~s", [float(S), M])).
 

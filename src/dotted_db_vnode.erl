@@ -21,9 +21,10 @@
 
 -export([
          read/3,
+         repair/3,
          write/6,
          replicate/4,
-         sync_start/2,
+         sync_start/3,
          sync_request/4,
          sync_response/5
         ]).
@@ -39,6 +40,8 @@
         id          :: id(),
         % index on the consistent hashing ring
         index       :: index(),
+        % the current node pid
+        node        :: node(),
         % node logical clock
         clock       :: bvv(),
         % key->value store, where the value is a DCC (values + logical clock)
@@ -77,6 +80,12 @@ read(ReplicaNodes, ReqID, Key) ->
                                    ?MASTER).
 
 
+repair(OutdatedNodes, BKey, DCC) ->
+    riak_core_vnode_master:command(OutdatedNodes,
+                                   {repair, BKey, DCC},
+                                   {fsm, undefined, self()},
+                                   ?MASTER).
+
 write(Coordinator, ReqID, Op, Key, Value, Context) ->
     riak_core_vnode_master:command(Coordinator,
                                    {write, ReqID, Op, Key, Value, Context},
@@ -90,9 +99,9 @@ replicate(ReplicaNodes, ReqID, Key, DCC) ->
                                    {fsm, undefined, self()},
                                    ?MASTER).
 
-sync_start(Node, ReqID) ->
+sync_start(Node, Peer, ReqID) ->
     riak_core_vnode_master:command(Node,
-                                   {sync_start, ReqID},
+                                   {sync_start, ReqID, Peer},
                                    {fsm, undefined, self()},
                                    ?MASTER).
 
@@ -141,6 +150,7 @@ init([Index]) ->
         % for now, lets use the index in the consistent hash as the vnode ID
         id          = Index,
         index       = Index,
+        node        = node(),
         clock       = NodeClock,
         replicated  = Replicated,
         keylog      = KeyLog,
@@ -160,12 +170,12 @@ init([Index]) ->
 handle_command({read, ReqID, Key}, _Sender, State) ->
     Response =
         case dotted_db_storage:get(State#state.storage, Key) of
-            {error, not_found} -> 
+            {error, not_found} ->
                 % there is no key K in this node
                 % create an empty "object" and fill its causality with the node clock
                 % this is needed to ensure that deletes "win" over old writes at the coordinator
                 dcc:fill(dcc:new(), State#state.clock);
-            {error, Error} -> 
+            {error, Error} ->
                 % some unexpected error
                 lager:error("Error reading a key from storage (command read): ~p", [Error]),
                 % return the error
@@ -179,8 +189,25 @@ handle_command({read, ReqID, Key}, _Sender, State) ->
         true -> ok;
         false -> ok
     end,
-    {reply, {ok, ReqID, Response}, State};
+    IndexNode = {State#state.index, State#state.node},
+    {reply, {ok, ReqID, IndexNode, Response}, State};
 
+
+handle_command({repair, BKey, NewDCC}, _Sender, State) ->
+    NodeClock = dcc:add(State#state.clock, NewDCC),
+    % get and fill the causal history of the local key
+    DiskDCC = guaranteed_get(BKey, State),
+    % synchronize both objects
+    FinalDCC = dcc:sync(NewDCC, DiskDCC),
+    % save the new key DCC, while stripping the unnecessary causality
+    ok = dotted_db_storage:put(State#state.storage, BKey, dcc:strip(FinalDCC, NodeClock)),
+    % Optionally collect stats
+    case State#state.stats of
+        true -> ok;
+        false -> ok
+    end,
+    % return the updated node state
+    {noreply, State#state{clock = NodeClock}};
 
 
 
@@ -210,7 +237,7 @@ handle_command({write, ReqID, Operation, Key, Value, Context}, _Sender, State) -
         true -> % we can safely remove this key from disk (distributed deletes done right :-))
             ok = dotted_db_storage:delete(State#state.storage, Key);
         false -> % we still have relevant information (PUT or DELETE).
-        % this can still be a client delete, if the DCC has causal information 
+        % this can still be a client delete, if the DCC has causal information
         % newer than the node clock; or its a normal PUT.
             ok = dotted_db_storage:put(State#state.storage, Key, StrippedDCC)
     end,
@@ -221,7 +248,7 @@ handle_command({write, ReqID, Operation, Key, Value, Context}, _Sender, State) -
     UpdatesMemory =  case State#state.updates_mem =< ?UPDATE_LIMITE of
         true -> % it's still early to save to storage
             State#state.updates_mem + 1;
-        false -> 
+        false ->
             % it's time to persist vnode state
             save_vnode_state(State#state.dets, State#state.id, {NodeClock, KeyLog, State#state.replicated}),
             % restart the counter
@@ -229,14 +256,21 @@ handle_command({write, ReqID, Operation, Key, Value, Context}, _Sender, State) -
     end,
     % Optionally collect stats
     case State#state.stats of
-        true -> 
-            dotted_db_stats:notify(bvv_size, size(term_to_binary(NodeClock))),
+        true ->
+            dotted_db_stats:notify({histogram, bvv_size}, size(term_to_binary(NodeClock))),
             {_, List1} = KeyLog,
-            dotted_db_stats:notify(kl_len, length(List1));
+            dotted_db_stats:notify({histogram, kl_len}, length(List1)),
+
+            % MetaF = byte_size(term_to_binary(dcc:context(NewDCC))),
+            % MetaS = byte_size(term_to_binary(dcc:context(StrippedDCC))),
+            % CCF = length(dcc:context(NewDCC)),
+            % CCS = length(dcc:context(StrippedDCC)),
+            % dotted_db_stats:update_key_meta(State#state.index, 1, MetaF, MetaS, CCF, CCS);
+            ok;
         false -> ok
     end,
     % return the updated node state
-    {reply, {ok, ReqID, NewDCC}, 
+    {reply, {ok, ReqID, NewDCC},
         State#state{clock = NodeClock, keylog = KeyLog, updates_mem = UpdatesMemory}};
 
 
@@ -246,11 +280,20 @@ handle_command({replicate, ReqID, Key, NewDCC}, _Sender, State) ->
     DiskDCC = guaranteed_get(Key, State),
     % synchronize both objects
     FinalDCC = dcc:sync(NewDCC, DiskDCC),
+    % strip the causality
+    StrippedDCC = dcc:strip(FinalDCC, NodeClock),
     % save the new key DCC, while stripping the unnecessary causality
-    ok = dotted_db_storage:put(State#state.storage, Key, dcc:strip(FinalDCC, NodeClock)),
+    ok = dotted_db_storage:put(State#state.storage, Key, StrippedDCC),
     % Optionally collect stats
     case State#state.stats of
-        true -> ok;
+        true ->
+
+            % MetaF = byte_size(term_to_binary(dcc:context(FinalDCC))),
+            % MetaS = byte_size(term_to_binary(dcc:context(StrippedDCC))),
+            % CCF = length(dcc:context(FinalDCC)),
+            % CCS = length(dcc:context(StrippedDCC)),
+            % dotted_db_stats:update_key_meta(State#state.index, 1, MetaF, MetaS, CCF, CCS);
+            ok;
         false -> ok
     end,
     % return the updated node state
@@ -263,25 +306,11 @@ handle_command({replicate, ReqID, Key, NewDCC}, _Sender, State) ->
 %%% SYNCHRONIZING
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-handle_command({sync_start, ReqID}, _Sender, State) ->
-    % get this node's peers, i.e., all nodes that replicates any subset of local keys
-    Peers = dotted_db_utils:peers(State#state.index),
-    % choose a random node from that list
-    Peer = {Index,_Node} = dotted_db_utils:random_from_list(Peers),
-    % get the "Peer"'s entry from this node clock 
-    RemoteEntry = bvv:get(Index, State#state.clock),
-    % Optionally collect stats
-    case State#state.stats of
-        true -> ok;
-            % #{
-            %     nodeA   => {State#state.id, node()},
-            %     nodeB   => Peer,
-            %     peers   => Peers
-            % };
-        false -> ok
-    end,
-    %send a sync message to that node
-    {reply, {ok, ReqID, Peer, State#state.id, RemoteEntry}, State};
+handle_command({sync_start, ReqID, _Peer={PIndex,_}}, _Sender, State) ->
+    % get the "Peer"'s entry from this node clock
+    RemoteEntry = bvv:get(PIndex, State#state.clock),
+    % send a sync message to that node
+    {reply, {ok, ReqID, State#state.id, RemoteEntry}, State};
 
 
 handle_command({sync_request, ReqID, RemoteID, RemoteEntry={Base,_Dots}}, _Sender, State) ->
@@ -295,7 +324,7 @@ handle_command({sync_request, ReqID, RemoteID, RemoteEntry={Base,_Dots}}, _Sende
     % get the keys corresponding to the missing dots,
     MissingKeys = [lists:nth(MDot-KBase, KeyList) || MDot <- MisssingDots],
     % filter the keys that the asking node does not replicate
-    RelevantMissingKeys = [Key || Key <- MissingKeys, 
+    RelevantMissingKeys = [Key || Key <- MissingKeys,
                             lists:member(RemoteID, dotted_db_utils:replica_nodes_indices(Key))],
     % get each key's respective DCC
     RelevantMissingObjects = [{Key, guaranteed_get(Key, State)} || Key <- RelevantMissingKeys],
@@ -303,7 +332,7 @@ handle_command({sync_request, ReqID, RemoteID, RemoteEntry={Base,_Dots}}, _Sende
     StrippedObjects = [{Key, dcc:strip(DCC, State#state.clock)} || {Key,DCC} <- RelevantMissingObjects],
     % update the replicated clock to reflect what the asking node has about the local node
     Replicated = vv:add(State#state.replicated, {RemoteID, Base}),
-    % get that maximum dot generated at this node that is also known by all peers of this node (relevant nodes) 
+    % get that maximum dot generated at this node that is also known by all peers of this node (relevant nodes)
     MinimumDot = vv:min(Replicated),
     % remove the keys from the keylog that have a dot, corresponding to their position, smaller than the
     % minimum dot, i.e., this update is known by all nodes that replicate it and therefore can be removed
@@ -320,16 +349,25 @@ handle_command({sync_request, ReqID, RemoteID, RemoteEntry={Base,_Dots}}, _Sende
     % take this opportunity to revisit the removed keys from the keylog and try to strip them of their
     % current causal information; the goal is to removed all causal information (the VV in the DCC),
     % except the single dot for every concurrent value in the object.
-    LocalStrippedObjects = [{Key, guaranteed_get(Key, State)} || Key <- RemovedKeys],
+    LocalObjectsKLFull = [{Key, guaranteed_get(Key, State)} || Key <- RemovedKeys],
+    % strip their causality
+    LocalObjectsKLStrip = [{Key, dcc:strip(DCC, State#state.clock)} || {Key, DCC} <- LocalObjectsKLFull],
     % save the stripped versions of the keys that were removed from the keylog
-    [dotted_db_storage:put(State#state.storage, Key, dcc:strip(DCC, State#state.clock)) 
-        || {Key, DCC} <- LocalStrippedObjects],
+    [dotted_db_storage:put(State#state.storage, Key, DCC) || {Key, DCC} <- LocalObjectsKLStrip],
     % Optionally collect stats
     case State#state.stats of
         true ->
             {_B1,K1} = KeyLog,
-            dotted_db_stats:notify(bvv_size, size(term_to_binary(State#state.clock))),
-            dotted_db_stats:notify(kl_len, length(K1));
+            dotted_db_stats:notify({histogram, bvv_size}, size(term_to_binary(State#state.clock))),
+            dotted_db_stats:notify({histogram, kl_len}, length(K1)),
+
+            DCCF = [dcc:context(DCC) || {_Key, DCC} <- LocalObjectsKLFull],
+            DCCS = [dcc:context(DCC) || {_Key, DCC} <- LocalObjectsKLStrip],
+            MetaF = byte_size(term_to_binary(DCCF)),
+            MetaS = byte_size(term_to_binary(DCCS)),
+            CCF = lists:sum([length(DCC) || DCC <- DCCF]),
+            CCS = lists:sum([length(DCC) || DCC <- DCCS]),
+            dotted_db_stats:update_key_meta(State#state.index, length(LocalObjectsKLFull), MetaF, MetaS, CCF, CCS);
             % % get stats to return to the Sync FSM: {replicated vv, keylog, keylog length, b2a_number, b2a_size, b2a_size_full}
             % FilledObjects = [{Key, dcc:fill(DCC, State#state.clock)} || {Key,DCC} <- RelevantMissingObjects],
             % #{
@@ -355,19 +393,30 @@ handle_command({sync_response, ReqID, RespondingNodeID, RemoteNodeClockBase, Mis
     % the current knowledge it's receiving
     RemoteEntry = {_,0} = bvv:get(RespondingNodeID, RemoteNodeClockBase),
     NodeClock = bvv:store_entry(RespondingNodeID, RemoteEntry, State#state.clock),
-    % get the local objects corresponding to the received objects and fill the 
+    % get the local objects corresponding to the received objects and fill the
     % causal history for all of them
     FilledObjects =
-        [{ Key, dcc:fill(DCC, RemoteNodeClockBase), guaranteed_get(Key, State) } 
+        [{ Key, dcc:fill(DCC, RemoteNodeClockBase), guaranteed_get(Key, State) }
          || {Key,DCC} <- MissingObjects],
     % synchronize / merge the remote and local objects
-    SyncedObjects = [{ Key, dcc:sync(Remote, Local) } || {Key, Remote, Local} <- FilledObjects],
+    SyncedObjects = [{ Key, dcc:sync(Remote, Local), Local } || {Key, Remote, Local} <- FilledObjects],
+    % filter the objects that are not missing after all
+    RealMissingObjects = [{ Key, Synced } || {Key, Synced, Local} <- SyncedObjects, Synced =/= Local],
     % save the synced objects and strip their causal history
     [dotted_db_storage:put(State#state.storage, Key, dcc:strip(DCC, State#state.clock))
-        || {Key, DCC} <- SyncedObjects],
+        || {Key, DCC} <- RealMissingObjects],
     % Optionally collect stats
     case State#state.stats of
-        true -> ok;
+        true -> 
+            Meta = [ dcc:context(DCC)   || {_Key, DCC} <- MissingObjects],
+            Payload = [ dcc:values(DCC) || {_Key, DCC} <- MissingObjects],
+            MetaSize = byte_size(term_to_binary(Meta)) + byte_size(term_to_binary(RemoteNodeClockBase)),
+            PayloadSize = byte_size(term_to_binary(Payload)),
+            Size2 = dotted_db_utils:human_filesize(MetaSize),
+            lager:info("MissingObjects: ~p    E.bytes: ~s~n", [length(MissingObjects), Size2]),
+            Repaired = length(RealMissingObjects),
+            Sent = length(MissingObjects),
+            dotted_db_stats:sync_complete(State#state.index, Repaired, Sent, {PayloadSize, MetaSize});
         false -> ok
     end,
     {reply, {ok, ReqID}, State#state{clock = NodeClock}};
@@ -388,7 +437,7 @@ handle_command(Message, _Sender, State) ->
 
 
 %%%===================================================================
-%%% Coverage 
+%%% Coverage
 %%%===================================================================
 
 handle_coverage(vnode_state, _KeySpaces, {_, RefId, _}, State) ->
@@ -410,7 +459,7 @@ handle_coverage(Req, _KeySpaces, _Sender, State) ->
 
 
 %%%===================================================================
-%%% HANDOFF 
+%%% HANDOFF
 %%%===================================================================
 
 handle_handoff_command(?FOLD_REQ{foldfun=FoldFun, acc0=Acc0}, _Sender, State) ->
@@ -462,21 +511,21 @@ terminate(_Reason, State) ->
 %% Private
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-% @doc Returns the value (DCC) associated with the Key. 
+% @doc Returns the value (DCC) associated with the Key.
 % By default, we want to return a filled causality, unless we get a storage error.
-% If the key does not exists or for some reason, the storage returns an 
+% If the key does not exists or for some reason, the storage returns an
 % error, return an empty DCC (also filled).
 guaranteed_get(Key, State) ->
     case dotted_db_storage:get(State#state.storage, Key) of
-        {error, not_found} -> 
+        {error, not_found} ->
             % there is no key K in this node
             dcc:fill(dcc:new(), State#state.clock);
-        {error, Error} -> 
+        {error, Error} ->
             % some unexpected error
             lager:error("Error reading a key from storage (guaranteed GET): ~p", [Error]),
             % assume that the key was lost, i.e. it's equal to not_found
             dcc:new();
-        DCC -> 
+        DCC ->
             % get and fill the causal history of the local object
             dcc:fill(DCC, State#state.clock)
     end.
@@ -514,17 +563,17 @@ initialize_replicated(Index) ->
     % get this node's peers, i.e., all nodes that replicates any subset of local keys.
     PeerIDs = [ ID || {ID, _Node} <- dotted_db_utils:peers(Index)],
     % for replication factor N = 3, the numbers of peers should be 4 (2 vnodes before and 2 after).
-    (?N-1)*2 = length(PeerIDs),
+    (?REPLICATION_FACTOR-1)*2 = length(PeerIDs),
     % initialize the "replicated" version vector to 0 for all entries.
     % this is vital, because we basically care for the minimum value in all entries,
     % thus we require that every node peer must be present from the start.
     Replicated = lists:foldl(fun (ID,VV) -> vv:add(VV,{ID,0}) end , vv:new(), PeerIDs),
-    (?N-1)*2 = length(Replicated),
+    (?REPLICATION_FACTOR-1)*2 = length(Replicated),
     Replicated.
 
 % @doc Returns the Storage for this vnode.
 open_storage(Index) ->
-    % get the preferred backend in the configuration file, defaulting to ETS if 
+    % get the preferred backend in the configuration file, defaulting to ETS if
     % there is no preference.
     Backend = case app_helper:get_env(dotted_db, storage_backend) of
         "leveldb"   -> {backend, leveldb};
