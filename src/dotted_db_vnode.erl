@@ -322,7 +322,7 @@ handle_command({sync_request, ReqID, RemoteID, RemoteEntry={Base,_Dots}}, _Sende
     MisssingDots = LocalDots -- RemoteDots,
     {KBase, KeyList} = State#state.keylog,
     % get the keys corresponding to the missing dots,
-    MissingKeys = [lists:nth(MDot-KBase, KeyList) || MDot <- MisssingDots],
+    MissingKeys = [lists:nth(MDot-KBase, KeyList) || MDot <- MisssingDots, MDot > KBase],
     % filter the keys that the asking node does not replicate
     RelevantMissingKeys = [Key || Key <- MissingKeys,
                             lists:member(RemoteID, dotted_db_utils:replica_nodes_indices(Key))],
@@ -482,11 +482,17 @@ handoff_finished(_TargetNode, State) ->
     {ok, State}.
 
 handle_handoff_data(Data, State) ->
+    % decode the data received
     {Key, Obj} = dotted_db_utils:decode_kv(Data),
+    % add the clock from the object to the node clock
+    NodeClock = dcc:add(State#state.clock, Obj),
+    % get and fill the causal history of the local key
     NewObj = guaranteed_get(Key, State),
+    % synchronize both objects
     FinalObj = dcc:sync(Obj, NewObj),
-    ok = dotted_db_storage:put(State#state.storage, Key, dcc:strip(FinalObj, State#state.clock)),
-    {reply, ok, State}.
+    % save the new key DCC, while stripping the unnecessary causality
+    ok = dotted_db_storage:put(State#state.storage, Key, dcc:strip(FinalObj, NodeClock)),
+    {reply, ok, State#state{clock = NodeClock}}.
 
 encode_handoff_item(Key, Val) ->
     dotted_db_utils:encode_kv({Key,Val}).
@@ -497,9 +503,6 @@ is_empty(State) ->
 
 delete(State) ->
     {ok, State}.
-
-% handle_coverage(_Req, _KeySpaces, _Sender, State) ->
-%     {stop, not_implemented, State}.
 
 handle_exit(_Pid, _Reason, State) ->
     {noreply, State}.
