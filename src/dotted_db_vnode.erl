@@ -467,7 +467,10 @@ handle_handoff_command(?FOLD_REQ{foldfun=FoldFun, acc0=Acc0}, _Sender, State) ->
     % and our storage layer expect 2 elements ({K,V},Acc).
     WrapperFun = fun({Key,Val}, Acc) -> FoldFun(Key, Val, Acc) end,
     Acc = dotted_db_storage:fold(State#state.storage, WrapperFun, Acc0),
-    {reply, Acc, State}.
+    {reply, Acc, State};
+
+handle_handoff_command(_Command, _Sender, State) ->
+    {forward, State}.
 
 handoff_starting(_TargetNode, State) ->
     {true, State}.
