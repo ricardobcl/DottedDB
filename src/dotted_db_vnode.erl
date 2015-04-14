@@ -193,21 +193,22 @@ handle_command({read, ReqID, Key}, _Sender, State) ->
     {reply, {ok, ReqID, IndexNode, Response}, State};
 
 
-handle_command({repair, BKey, NewDCC}, _Sender, State) ->
-    NodeClock = dcc:add(State#state.clock, NewDCC),
-    % get and fill the causal history of the local key
-    DiskDCC = guaranteed_get(BKey, State),
-    % synchronize both objects
-    FinalDCC = dcc:sync(NewDCC, DiskDCC),
-    % save the new key DCC, while stripping the unnecessary causality
-    ok = dotted_db_storage:put(State#state.storage, BKey, dcc:strip(FinalDCC, NodeClock)),
-    % Optionally collect stats
-    case State#state.stats of
-        true -> ok;
-        false -> ok
-    end,
-    % return the updated node state
-    {noreply, State#state{clock = NodeClock}};
+handle_command({repair, BKey, NewDCC}, Sender, State) ->
+    % NodeClock = dcc:add(State#state.clock, NewDCC),
+    % % get and fill the causal history of the local key
+    % DiskDCC = guaranteed_get(BKey, State),
+    % % synchronize both objects
+    % FinalDCC = dcc:sync(NewDCC, DiskDCC),
+    % % save the new key DCC, while stripping the unnecessary causality
+    % ok = dotted_db_storage:put(State#state.storage, BKey, dcc:strip(FinalDCC, NodeClock)),
+    % % Optionally collect stats
+    % case State#state.stats of
+    %     true -> ok;
+    %     false -> ok
+    % end,
+    {reply, {ok, dummy_req_id}, State2} = 
+        handle_command({replicate, dummy_req_id, BKey, NewDCC}, Sender, State),
+    {noreply, State2};
 
 
 
@@ -322,7 +323,7 @@ handle_command({sync_request, ReqID, RemoteID, RemoteEntry={Base,_Dots}}, _Sende
     MisssingDots = LocalDots -- RemoteDots,
     {KBase, KeyList} = State#state.keylog,
     % get the keys corresponding to the missing dots,
-    MissingKeys = [lists:nth(MDot-KBase, KeyList) || MDot <- MisssingDots, MDot > KBase],
+    MissingKeys = [lists:nth(MDot-KBase, KeyList) || MDot <- MisssingDots],
     % filter the keys that the asking node does not replicate
     RelevantMissingKeys = [Key || Key <- MissingKeys,
                             lists:member(RemoteID, dotted_db_utils:replica_nodes_indices(Key))],
@@ -469,8 +470,37 @@ handle_handoff_command(?FOLD_REQ{foldfun=FoldFun, acc0=Acc0}, _Sender, State) ->
     Acc = dotted_db_storage:fold(State#state.storage, WrapperFun, Acc0),
     {reply, Acc, State};
 
-handle_handoff_command(_Command, _Sender, State) ->
-    {forward, State}.
+%% Ignore AAE sync requests
+handle_handoff_command(Cmd, _Sender, State) when 
+        element(1, Cmd) == sync_start orelse 
+        element(1, Cmd) == sync_request orelse 
+        element(1, Cmd) == sync_response ->
+    {drop, State};
+
+handle_handoff_command(Cmd, Sender, State) when 
+        element(1, Cmd) == replicate orelse 
+        element(1, Cmd) == repair ->
+    case handle_command(Cmd, Sender, State) of
+        {noreply, State2} ->
+            {forward, State2};
+        {reply, {ok,_}, State2} ->
+            {forward, State2}
+    end;
+
+%% For coordinating writes, do it locally and forward the replication
+handle_handoff_command(Cmd={write, ReqID, _, Key, _, _}, Sender, State) ->
+    % do the local coordinating write
+    {reply, {ok, ReqID, NewDCC}, State2} = handle_command(Cmd, Sender, State),
+    % send the ack to the PUT_FSM
+    riak_core_vnode:reply(Sender, {ok, ReqID, NewDCC}),
+    % create a new request to forward the replication of this new DCC/object
+    NewCommand = {replicate, ReqID, Key, NewDCC},
+    {forward, NewCommand, State2};
+
+%% Handle all other commands locally (only gets?)
+handle_handoff_command(Cmd, Sender, State) ->
+    lager:info("Handoff command ~p at ~p", [Cmd, State#state.id]),
+    handle_command(Cmd, Sender, State).
 
 handoff_starting(_TargetNode, State) ->
     {true, State}.
@@ -484,15 +514,16 @@ handoff_finished(_TargetNode, State) ->
 handle_handoff_data(Data, State) ->
     % decode the data received
     {Key, Obj} = dotted_db_utils:decode_kv(Data),
-    % add the clock from the object to the node clock
-    NodeClock = dcc:add(State#state.clock, Obj),
-    % get and fill the causal history of the local key
-    NewObj = guaranteed_get(Key, State),
-    % synchronize both objects
-    FinalObj = dcc:sync(Obj, NewObj),
-    % save the new key DCC, while stripping the unnecessary causality
-    ok = dotted_db_storage:put(State#state.storage, Key, dcc:strip(FinalObj, NodeClock)),
-    {reply, ok, State#state{clock = NodeClock}}.
+    % % add the clock from the object to the node clock
+    % NodeClock = dcc:add(State#state.clock, Obj),
+    % % get and fill the causal history of the local key
+    % NewObj = guaranteed_get(Key, State),
+    % % synchronize both objects
+    % FinalObj = dcc:sync(Obj, NewObj),
+    % % save the new key DCC, while stripping the unnecessary causality
+    % ok = dotted_db_storage:put(State#state.storage, Key, dcc:strip(FinalObj, NodeClock)),
+    {reply, {ok, _}, State2} = handle_command({replicate, dummy_req_id, Key, Obj}, undefined, State),
+    {reply, ok, State2}.
 
 encode_handoff_item(Key, Val) ->
     dotted_db_utils:encode_kv({Key,Val}).
@@ -502,7 +533,12 @@ is_empty(State) ->
     {Bool, State}.
 
 delete(State) ->
-    {ok, State}.
+    case dotted_db_storage:destroy(State#state.storage) of
+        ok ->
+            {ok, State};
+        {error, Reason} ->
+            {error, Reason, State}
+    end.
 
 handle_exit(_Pid, _Reason, State) ->
     {noreply, State}.

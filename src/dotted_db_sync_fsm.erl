@@ -60,11 +60,17 @@ sync_start(timeout, State=#state{   req_id  = ReqID,
     {next_state, sync_request, State#state{peer=Peer}, State#state.timeout}.
 
 %% @doc
+sync_request(timeout, State) ->
+    State#state.from ! {State#state.req_id, timeout},
+    {stop, timeout, State};
 sync_request({ok, ReqID, RemoteNodeID, RemoteEntry}, State=#state{peer = Peer}) ->
     dotted_db_vnode:sync_request(Peer, ReqID, RemoteNodeID, RemoteEntry),
     {next_state, sync_response, State, State#state.timeout}.
 
 %% @doc
+sync_response(timeout, State) ->
+    State#state.from ! {State#state.req_id, timeout},
+    {stop, timeout, State};
 sync_response({ok, ReqID, _, _, []}, State) ->
     State#state.from ! {ReqID, ok, sync},
     {stop, normal, State};
@@ -73,6 +79,9 @@ sync_response({ok, ReqID, RemoteNodeID, RemoteNodeClockBase, MissingObjects}, St
     {next_state, sync_ack, State, State#state.timeout}.
 
 %% @doc
+sync_ack(timeout, State) ->
+    State#state.from ! {State#state.req_id, timeout},
+    {stop, timeout, State};
 sync_ack({ok, ReqID}, State) ->
     State#state.from ! {ReqID, ok, sync},
     {stop, normal, State}.

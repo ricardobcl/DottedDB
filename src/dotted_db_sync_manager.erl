@@ -64,6 +64,9 @@ handle_info(tick, State) ->
     {noreply, State1};
 handle_info({_RefId, ok, sync}, State) ->
     {noreply, State};
+handle_info({_RefId, timeout}, State) ->
+    lager:warning("Sync request timeout!"),
+    {noreply, State};
 handle_info({'DOWN', _RefId, _, _Pid, _Status}, State) ->
     {noreply, State};
 handle_info(Info, State) ->
