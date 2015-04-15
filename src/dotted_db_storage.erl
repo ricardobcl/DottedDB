@@ -13,7 +13,8 @@
             write_batch/2,
             fold/3,
             fold_keys/3,
-            is_empty/1
+            is_empty/1,
+            drop/1
          ]).
 
 -type storage() :: #engine{}.
@@ -36,7 +37,14 @@ open(Name, [{backend, ets}]) ->
 %% @doc close a storage
 -spec close(storage()) -> ok | {error, any()}.
 close(Engine) ->
-    rkvs:close(Engine).
+    case Engine#engine.ref of
+        undefined ->
+            ok;
+        <<>> ->
+            ok;
+        _ ->
+            rkvs:close(Engine)
+    end.
 
 %% @doc close a storage and remove all the data
 -spec destroy(storage()) -> ok | {error, any()}.
@@ -76,8 +84,20 @@ fold_keys(Engine, Fun, Acc0) ->
 fold(Engine, Fun, Acc0) ->
     rkvs:fold(Engine, Fun, Acc0, []).
 
-%% @doc Returns true if this backend contains any values; otherwise returns false.
+%% @doc Returns true if this backend has no values; otherwise returns false.
 -spec is_empty(storage()) -> boolean() | {error, term()}.
 is_empty(Engine) ->
     rkvs:is_empty(Engine).
 
+
+%% @doc Delete all objects from this backend
+%% and return a fresh reference.
+-spec drop(storage()) -> {ok, storage()} | {error, term(), storage()}.
+drop(Engine) ->
+    close(Engine),
+    case rkvs:destroy(Engine) of
+        ok ->
+            {ok, Engine#engine{ref = undefined}};
+        {error, Reason} ->
+            {error, Reason, Engine}
+    end.

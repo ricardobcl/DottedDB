@@ -323,7 +323,7 @@ handle_command({sync_request, ReqID, RemoteID, RemoteEntry={Base,_Dots}}, _Sende
     MisssingDots = LocalDots -- RemoteDots,
     {KBase, KeyList} = State#state.keylog,
     % get the keys corresponding to the missing dots,
-    MissingKeys = [lists:nth(MDot-KBase, KeyList) || MDot <- MisssingDots],
+    MissingKeys = [lists:nth(MDot-KBase, KeyList) || MDot <- MisssingDots, MDot > KBase],
     % filter the keys that the asking node does not replicate
     RelevantMissingKeys = [Key || Key <- MissingKeys,
                             lists:member(RemoteID, dotted_db_utils:replica_nodes_indices(Key))],
@@ -533,11 +533,14 @@ is_empty(State) ->
     {Bool, State}.
 
 delete(State) ->
-    case dotted_db_storage:destroy(State#state.storage) of
-        ok ->
-            {ok, State};
-        {error, Reason} ->
-            {error, Reason, State}
+    case dotted_db_storage:drop(State#state.storage) of
+        {ok, Storage} ->
+            {ok, State#state{storage=Storage}};
+            % {ok, State};
+        {error, Reason, Storage} ->
+            lager:warning("Error on destroying storage: ~p",[Reason]),
+            {ok, State#state{storage=Storage}}
+            % {ok, State}
     end.
 
 handle_exit(_Pid, _Reason, State) ->
@@ -636,6 +639,10 @@ close_all(_State=#state{id          = Id,
                         replicated  = Replicated,
                         keylog      = KeyLog,
                         dets        = Dets } ) ->
-    ok = dotted_db_storage:close(Storage),
+    case dotted_db_storage:close(Storage) of
+        ok -> ok;
+        {error, Reason} ->
+            lager:warning("Error on closing storage: ~p",[Reason])
+    end,
     ok = save_vnode_state(Dets, Id, {NodeClock, KeyLog, Replicated}),
     ok = dets:close(Dets).
