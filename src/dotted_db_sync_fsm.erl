@@ -50,8 +50,9 @@ init([ReqID, From, Vnode]) ->
 %% @doc
 sync_start(timeout, State=#state{   req_id  = ReqID,
                                     vnode   = Vnode}) ->
+    ThisNode = node(),
     % get the ring index for thing vnode
-    {Index, _ } = Vnode,
+    {Index, ThisNode} = Vnode,
     % get this node's peers, i.e., all nodes that replicates any subset of local keys
     Peers = dotted_db_utils:peers(Index),
     % choose a random node from that list
@@ -62,7 +63,7 @@ sync_start(timeout, State=#state{   req_id  = ReqID,
 %% @doc
 sync_request(timeout, State) ->
     State#state.from ! {State#state.req_id, timeout},
-    {stop, timeout, State};
+    {stop, normal, State};
 sync_request({ok, ReqID, RemoteNodeID, RemoteEntry}, State=#state{peer = Peer}) ->
     dotted_db_vnode:sync_request(Peer, ReqID, RemoteNodeID, RemoteEntry),
     {next_state, sync_response, State, State#state.timeout}.
@@ -70,7 +71,7 @@ sync_request({ok, ReqID, RemoteNodeID, RemoteEntry}, State=#state{peer = Peer}) 
 %% @doc
 sync_response(timeout, State) ->
     State#state.from ! {State#state.req_id, timeout},
-    {stop, timeout, State};
+    {stop, normal, State};
 sync_response({ok, ReqID, _, _, []}, State) ->
     State#state.from ! {ReqID, ok, sync},
     {stop, normal, State};
@@ -81,7 +82,7 @@ sync_response({ok, ReqID, RemoteNodeID, RemoteNodeClockBase, MissingObjects}, St
 %% @doc
 sync_ack(timeout, State) ->
     State#state.from ! {State#state.req_id, timeout},
-    {stop, timeout, State};
+    {stop, normal, State};
 sync_ack({ok, ReqID}, State) ->
     State#state.from ! {ReqID, ok, sync},
     {stop, normal, State}.

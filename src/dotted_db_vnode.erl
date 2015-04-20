@@ -123,6 +123,7 @@ sync_response(Node, ReqID, RemoteNodeID, RemoteNodeClockBase, MissingObjects) ->
 %%%===================================================================
 
 init([Index]) ->
+    lager:debug("INITS: {~p, ~p}",[Index,node()]),
     % try to read the vnode state in the DETS file, if it exists
     {Dets, NodeClock, KeyLog, Replicated} =
         case read_vnode_state(Index) of
@@ -499,10 +500,11 @@ handle_handoff_command(Cmd={write, ReqID, _, Key, _, _}, Sender, State) ->
 
 %% Handle all other commands locally (only gets?)
 handle_handoff_command(Cmd, Sender, State) ->
-    lager:info("Handoff command ~p at ~p", [Cmd, State#state.id]),
+    lager:debug("Handoff command ~p at ~p", [Cmd, State#state.id]),
     handle_command(Cmd, Sender, State).
 
-handoff_starting(_TargetNode, State) ->
+handoff_starting(TargetNode, State) ->
+    lager:debug("HAND_START: {~p, ~p} to ~p",[State#state.index, node(), TargetNode]),
     {true, State}.
 
 handoff_cancelled(State) ->
@@ -530,15 +532,19 @@ encode_handoff_item(Key, Val) ->
 
 is_empty(State) ->
     Bool = dotted_db_storage:is_empty(State#state.storage),
+    lager:debug("IS_EMPTY: ~p on {~p, ~p}",[Bool, State#state.index, node()]),
     {Bool, State}.
 
 delete(State) ->
+    % lager:debug("DELS: {~p, ~p}",[State#state.index, node()]),
     case dotted_db_storage:drop(State#state.storage) of
         {ok, Storage} ->
+            lager:debug("GOOD_DROP: {~p, ~p}",[State#state.index, node()]),
             {ok, State#state{storage=Storage}};
             % {ok, State};
         {error, Reason, Storage} ->
-            lager:warning("Error on destroying storage: ~p",[Reason]),
+            lager:debug("BAD_DROP: {~p, ~p}  Reason: ~p",[State#state.index, node(), Reason]),
+            % lager:warning("Error on destroying storage: ~p",[Reason]),
             {ok, State#state{storage=Storage}}
             % {ok, State}
     end.
@@ -547,6 +553,7 @@ handle_exit(_Pid, _Reason, State) ->
     {noreply, State}.
 
 terminate(_Reason, State) ->
+    lager:debug("HAND_TERM: {~p, ~p}",[State#state.index, node()]),
     close_all(State),
     ok.
 

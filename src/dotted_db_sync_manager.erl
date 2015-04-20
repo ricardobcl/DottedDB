@@ -13,8 +13,8 @@
 
 
 -record(state, {mode           = on        :: on | off,
-                tick           = 0         :: non_neg_integer(),
-                nodes          = []        :: [index_node()]
+                tick           = 0         :: non_neg_integer()
+                % nodes          = []        :: [index_node()]
                }).
 
 -type state() :: #state{}.
@@ -41,10 +41,10 @@ disable() ->
 init([]) ->
     Tick = app_helper:get_env(dotted_db, anti_entropy_tick, ?TICK),
     schedule_tick(Tick),
-    LocalVnodes = dotted_db_utils:vnodes_from_node(node()),
+    % LocalVnodes = dotted_db_utils:vnodes_from_node(node()),
     State = #state{ mode    = on,
-                    tick    = Tick,
-                    nodes   = LocalVnodes},
+                    tick    = Tick},
+                    % nodes   = LocalVnodes},
     {ok, State}.
 
 handle_call(enable, _From, State) ->
@@ -100,15 +100,24 @@ schedule_tick(Tick) ->
     ok.
 
 -spec tick(state()) -> {any(), state()}.
-tick(State=#state{nodes=Nodes}) ->
+tick(State) ->
     lager:debug("Start new tick for AAE Sync"),
     ReqID = dotted_db_utils:make_request_id(),
-    Node = dotted_db_utils:random_from_list(Nodes),
-    case dotted_db_sync_fsm:start(ReqID, self(), Node) of
-        {ok, FSMPid} ->
-            _Ref = monitor(process, FSMPid),
+    case dotted_db_utils:vnodes_from_node(node()) of
+        [] -> 
+            lager:warning("No vnodes to do AAE sync on node ~p", [node()]),
             {ok, State};
-        {error, Reason} ->
-            lager:warning("~p: error on sync_fsm:start. Reason:~p", [?MODULE, Reason]),
-            {Reason, State}
+        Vnodes ->
+            VN = case Vnodes of
+                [Vnode] -> Vnode;
+                _ -> dotted_db_utils:random_from_list(Vnodes)
+            end,
+            case dotted_db_sync_fsm:start(ReqID, self(), VN) of
+                {ok, FSMPid} ->
+                    _Ref = monitor(process, FSMPid),
+                    {ok, State};
+                {error, Reason} ->
+                    lager:warning("~p: error on sync_fsm:start. Reason:~p", [?MODULE, Reason]),
+                    {Reason, State}
+            end
     end.

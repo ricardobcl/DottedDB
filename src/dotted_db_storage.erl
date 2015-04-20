@@ -29,10 +29,36 @@ open(Name) ->
 
 %% @doc open a storage, and pass options to the backend.
 -spec open(list(), list()) -> {ok, storage()} | {error, any()}.
-open(Name, [{backend, leveldb}]) ->
-    rkvs:open(Name, [{backend, rkvs_leveldb}]);
 open(Name, [{backend, ets}]) ->
-    rkvs:open(Name, [{backend, rkvs_ets}]).
+    rkvs:open(Name, [{backend, rkvs_ets}]);
+open(Name, [{backend, leveldb}]) ->
+    try_open_level_db(Name, 5, undefined).
+
+try_open_level_db(_Name, 0, LastError) ->
+    {error, LastError};
+try_open_level_db(Name, RetriesLeft, _) ->
+    case rkvs:open(Name, [{backend, rkvs_leveldb}]) of
+        {ok, Engine} ->
+            {ok, Engine};
+        %% Check specifically for lock error, this can be caused if
+        %% a crashed vnode takes some time to flush leveldb information
+        %% out to disk.  The process is gone, but the NIF resource cleanup
+        %% may not have completed.
+        {error, {db_open, OpenErr}=Reason} ->
+            case lists:prefix("IO error: lock ", OpenErr) of
+                true ->
+                    SleepFor = 2000,
+                    lager:warning("Leveldb Open backend retrying ~p in ~p ms after error ~s\n",
+                                [Name, SleepFor, OpenErr]),
+                    timer:sleep(SleepFor),
+                    try_open_level_db(Name, RetriesLeft - 1, Reason);
+                false ->
+                    {error, Reason}
+            end;
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
 
 %% @doc close a storage
 -spec close(storage()) -> ok | {error, any()}.
@@ -94,10 +120,33 @@ is_empty(Engine) ->
 %% and return a fresh reference.
 -spec drop(storage()) -> {ok, storage()} | {error, term(), storage()}.
 drop(Engine) ->
+    drop(Engine, 2, undefined).
+
+drop(Engine, 0, LastError) ->
+    % os:cmd("rm -rf " ++ Engine#engine.name),
+    {error, LastError, Engine};
+drop(Engine, RetriesLeft, _) ->
     close(Engine),
+    % Engine2 = Engine#engine{options=[{db_opts,{create_if_missing, false}}]},
     case rkvs:destroy(Engine) of
         ok ->
-            {ok, Engine#engine{ref = undefined}};
+            % {ok, Engine#engine{ref = undefined}};
+            {ok, Engine};
+        %% Check specifically for lock error, this can be caused if
+        %% a crashed vnode takes some time to flush leveldb information
+        %% out to disk.  The process is gone, but the NIF resource cleanup
+        %% may not have completed.
+        {error, {error_db_destroy, DestroyErr}=Reason} ->
+            case lists:prefix("IO error: lock ", DestroyErr) of
+                true ->
+                    SleepFor = 2000,
+                    % lager:warning("Leveldb destroy backend retrying {~p,~p} in ~p ms after error ~s\n",
+                                % [Engine#engine.name, node(), SleepFor, DestroyErr]),
+                    timer:sleep(SleepFor),
+                    drop(Engine, RetriesLeft - 1, Reason);
+                false ->
+                    {error, Reason}
+            end;
         {error, Reason} ->
             {error, Reason, Engine}
     end.
