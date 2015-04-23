@@ -145,16 +145,24 @@ init([Index]) ->
                 {Ref, Clock, KLog, Repli}
         end,
     % open the storage backend for the key-values of this vnode
-    Storage = open_storage(Index),
+    {Storage, NodeClock2, KeyLog2, Replicated2} =
+        case open_storage(Index) of
+            {{backend, ets}, S} ->
+                % if the storage is in memory, start with an "empty" vnode state
+                {S, bvv:new(), {0,[]}, initialize_replicated(Index)};
+            {_, S} ->
+                {S, NodeClock, KeyLog, Replicated}
+        end,
+    % ?PRINT({node(), Index,NodeClock2, KeyLog2, Replicated2} ),
     % create the state
     {ok, #state{
         % for now, lets use the index in the consistent hash as the vnode ID
         id          = Index,
         index       = Index,
         node        = node(),
-        clock       = NodeClock,
-        replicated  = Replicated,
-        keylog      = KeyLog,
+        clock       = NodeClock2,
+        replicated  = Replicated2,
+        keylog      = KeyLog2,
         storage     = Storage,
         dets        = Dets,
         updates_mem = 0,
@@ -175,7 +183,7 @@ handle_command({read, ReqID, Key}, _Sender, State) ->
                 % there is no key K in this node
                 % create an empty "object" and fill its causality with the node clock
                 % this is needed to ensure that deletes "win" over old writes at the coordinator
-                dcc:fill(dcc:new(), State#state.clock);
+                {ok, dcc:fill(dcc:new(), State#state.clock)};
             {error, Error} ->
                 % some unexpected error
                 lager:error("Error reading a key from storage (command read): ~p", [Error]),
@@ -183,7 +191,7 @@ handle_command({read, ReqID, Key}, _Sender, State) ->
                 {error, Error};
             DCC ->
                 % get and fill the causal history of the local object
-                dcc:fill(DCC, State#state.clock)
+                {ok, dcc:fill(DCC, State#state.clock)}
         end,
     % Optionally collect stats
     case State#state.stats of
@@ -207,7 +215,7 @@ handle_command({repair, BKey, NewDCC}, Sender, State) ->
     %     true -> ok;
     %     false -> ok
     % end,
-    {reply, {ok, dummy_req_id}, State2} = 
+    {reply, {ok, dummy_req_id}, State2} =
         handle_command({replicate, dummy_req_id, BKey, NewDCC}, Sender, State),
     {noreply, State2};
 
@@ -256,6 +264,7 @@ handle_command({write, ReqID, Operation, Key, Value, Context}, _Sender, State) -
             % restart the counter
             0
     end,
+    % ?PRINT({Key, Value, Context, StrippedDCC}),
     % Optionally collect stats
     case State#state.stats of
         true ->
@@ -286,6 +295,7 @@ handle_command({replicate, ReqID, Key, NewDCC}, _Sender, State) ->
     StrippedDCC = dcc:strip(FinalDCC, NodeClock),
     % save the new key DCC, while stripping the unnecessary causality
     ok = dotted_db_storage:put(State#state.storage, Key, StrippedDCC),
+    % ?PRINT({Key, NewDCC,StrippedDCC}),
     % Optionally collect stats
     case State#state.stats of
         true ->
@@ -309,6 +319,7 @@ handle_command({replicate, ReqID, Key, NewDCC}, _Sender, State) ->
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 handle_command({sync_start, ReqID, _Peer={PIndex,_}}, _Sender, State) ->
+    lager:info("new syn req"),
     % get the "Peer"'s entry from this node clock
     RemoteEntry = bvv:get(PIndex, State#state.clock),
     % send a sync message to that node
@@ -409,7 +420,7 @@ handle_command({sync_response, ReqID, RespondingNodeID, RemoteNodeClockBase, Mis
         || {Key, DCC} <- RealMissingObjects],
     % Optionally collect stats
     case State#state.stats of
-        true -> 
+        true ->
             Meta = [ dcc:context(DCC)   || {_Key, DCC} <- MissingObjects],
             Payload = [ dcc:values(DCC) || {_Key, DCC} <- MissingObjects],
             MetaSize = byte_size(term_to_binary(Meta)) + byte_size(term_to_binary(RemoteNodeClockBase)),
@@ -472,14 +483,14 @@ handle_handoff_command(?FOLD_REQ{foldfun=FoldFun, acc0=Acc0}, _Sender, State) ->
     {reply, Acc, State};
 
 %% Ignore AAE sync requests
-handle_handoff_command(Cmd, _Sender, State) when 
-        element(1, Cmd) == sync_start orelse 
-        element(1, Cmd) == sync_request orelse 
+handle_handoff_command(Cmd, _Sender, State) when
+        element(1, Cmd) == sync_start orelse
+        element(1, Cmd) == sync_request orelse
         element(1, Cmd) == sync_response ->
     {drop, State};
 
-handle_handoff_command(Cmd, Sender, State) when 
-        element(1, Cmd) == replicate orelse 
+handle_handoff_command(Cmd, Sender, State) when
+        element(1, Cmd) == replicate orelse
         element(1, Cmd) == repair ->
     case handle_command(Cmd, Sender, State) of
         {noreply, State2} ->
@@ -500,11 +511,11 @@ handle_handoff_command(Cmd={write, ReqID, _, Key, _, _}, Sender, State) ->
 
 %% Handle all other commands locally (only gets?)
 handle_handoff_command(Cmd, Sender, State) ->
-    lager:debug("Handoff command ~p at ~p", [Cmd, State#state.id]),
+    lager:info("Handoff command ~p at ~p", [Cmd, State#state.id]),
     handle_command(Cmd, Sender, State).
 
 handoff_starting(TargetNode, State) ->
-    lager:debug("HAND_START: {~p, ~p} to ~p",[State#state.index, node(), TargetNode]),
+    lager:info("HAND_START: {~p, ~p} to ~p",[State#state.index, node(), TargetNode]),
     {true, State}.
 
 handoff_cancelled(State) ->
@@ -532,18 +543,18 @@ encode_handoff_item(Key, Val) ->
 
 is_empty(State) ->
     Bool = dotted_db_storage:is_empty(State#state.storage),
-    lager:debug("IS_EMPTY: ~p on {~p, ~p}",[Bool, State#state.index, node()]),
+    lager:info("IS_EMPTY: ~p on {~p, ~p}",[Bool, State#state.index, node()]),
     {Bool, State}.
 
 delete(State) ->
     % lager:debug("DELS: {~p, ~p}",[State#state.index, node()]),
     case dotted_db_storage:drop(State#state.storage) of
         {ok, Storage} ->
-            lager:debug("GOOD_DROP: {~p, ~p}",[State#state.index, node()]),
+            lager:info("GOOD_DROP: {~p, ~p}",[State#state.index, node()]),
             {ok, State#state{storage=Storage}};
             % {ok, State};
         {error, Reason, Storage} ->
-            lager:debug("BAD_DROP: {~p, ~p}  Reason: ~p",[State#state.index, node(), Reason]),
+            lager:info("BAD_DROP: {~p, ~p}  Reason: ~p",[State#state.index, node(), Reason]),
             % lager:warning("Error on destroying storage: ~p",[Reason]),
             {ok, State#state{storage=Storage}}
             % {ok, State}
@@ -632,11 +643,11 @@ open_storage(Index) ->
         "ets"       -> {backend, ets};
         _           -> {backend, ets}
     end,
-    lager:debug("Using ~p for vnode ~p.",[Backend,Index]),
+    lager:info("Using ~p for vnode ~p.",[Backend,Index]),
     % give the name to the backend for this vnode using its position in the ring.
     DBName = filename:join("data/objects/", integer_to_list(Index)),
     {ok, Storage} = dotted_db_storage:open(DBName, [Backend]),
-    Storage.
+    {Backend, Storage}.
 
 % @doc Close the key-value backend, save the vnode state and close the DETS file.
 close_all(undefined) -> ok;

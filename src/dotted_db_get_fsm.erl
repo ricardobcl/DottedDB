@@ -184,7 +184,7 @@ create_client_reply(From, ReqID, _Replies, _ReturnValue = false) ->
     From ! {ReqID, ok, get, false};
 create_client_reply(From, ReqID, Replies, _ReturnValue = true) ->
     FinalDCC = final_dcc_from_replies(Replies),
-    case FinalDCC =:= dcc:new() of
+    case dcc:values(FinalDCC) =:= [] of
         true -> % no response found; return the context for possibly future writes
             From ! {ReqID, not_found, get, dcc:context(FinalDCC)};
         false -> % there is at least on value for this key

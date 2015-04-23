@@ -10,7 +10,7 @@
 -define(DELETE_OP, delete_op).
 -define(WRITE_OP, write_op).
 
--define(TICK, 100).
+-define(TICK, 4294967292).
 
 %% Options for read requests.
 -define(OPT_DO_RR, do_read_repair).
@@ -19,7 +19,7 @@
 %% Options for put/delete requests.
 -define(OPT_PUT_REPLICAS, put_replicas).
 -define(OPT_PUT_MIN_ACKS, put_acks).
--define(ALL_REPLICAS_WRITE_RATIO, 0.9). % x percent of put/deletes go to all replica nodes
+-define(ALL_REPLICAS_WRITE_RATIO, 1.0). % x percent of put/deletes go to all replica nodes
 
 -define(OPT_TIMEOUT, opt_timeout).
 

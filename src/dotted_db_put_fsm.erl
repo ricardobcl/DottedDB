@@ -120,8 +120,6 @@ write(timeout, State=#state{req_id      = ReqID,
                             key         = Key,
                             value       = Value,
                             context     = Context}) ->
-    % % add an entry in the write requests for this key, to track acks from remote nodes
-    % Writes = dict:store(Key, sets:new(), State#state.writes),
     dotted_db_vnode:write(Coordinator, ReqID, Operation, Key, Value, Context),
     {next_state, waiting_coordinator, State}.
 
@@ -145,14 +143,10 @@ waiting_coordinator({ok, ReqID, DCC}, State=#state{ req_id      = ReqID,
                 end,
     case Acks + 1 >= Replication of
         true  -> %% If true, we don't want to replicate to more replica nodes.
-            % ?PRINT("PUT_FSM: (1):"),
-            % ?PRINT(Acks+1),
             {stop, normal, State};
         false ->  %% Else, replicate to the remaining number of replica nodes, according to `Replication`
             Replicas2 = dotted_db_utils:random_sublist(Replicas -- Coordinator, Replication - 1),
-            % ?PRINT("PUT_FSM: (3):"),
-            % ?PRINT(length(Replicas2) + 1),
-            % ?PRINT("PUT FSM: I'm replicating to ~p replica nodes in total.", [length(Replicas2) + 1]),
+            lager:debug("PUT FSM: I'm replicating to ~p replica nodes in total.", [length(Replicas2) + 1]),
             dotted_db_vnode:replicate(Replicas2, ReqID, BKey, DCC),
             {next_state, waiting_replicas, State#state{acks=Acks+1, completed=Completed}, Timeout}
     end.
@@ -182,8 +176,6 @@ waiting_replicas({ok, ReqID}, State=#state{ req_id      = ReqID,
     end,
     case Acks + 1 >= Replication of
         true  ->
-            % ?PRINT("PUT_FSM: (2):"),
-            % ?PRINT(Acks+1),
             {stop, normal, NewState};
         false ->
             {next_state, waiting_replicas, NewState}
@@ -199,18 +191,10 @@ handle_event(_Event, _StateName, StateData) ->
 handle_sync_event(_Event, _From, _StateName, StateData) ->
     {stop,badmsg,StateData}.
 
-code_change(_OldVsn, StateName, State, _Extra) -> 
+code_change(_OldVsn, StateName, State, _Extra) ->
     {ok, StateName, State}.
 
-finalize(timeout, State=#state{key=_Key}) ->
-    % MObj = merge(Replies),
-    % case needs_repair(MObj, Replies) of
-    %     true ->
-    %         repair(Key, MObj, Replies),
-    %         {stop, normal, SD};
-    %     false ->
-    %         {stop, normal, SD}
-    % end.
+finalize(timeout, State) ->
     {stop, normal, State}.
 
 terminate(_Reason, _SN, _SD) ->
