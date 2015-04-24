@@ -226,6 +226,19 @@ handle_command({repair, BKey, NewDCC}, Sender, State) ->
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 handle_command({write, ReqID, Operation, Key, Value, Context}, _Sender, State) ->
+
+% debug
+    RN = dotted_db_utils:replica_nodes(Key),
+    This = {State#state.id, node()},
+    case lists:member(This, RN) of
+        true   ->
+            ok;
+        false ->
+            lager:info("IxNd: ~p work vnode for key ~p in ~p", [This, Key, RN])
+    end,
+
+
+
     % get and fill the causal history of the local key
     DiskDCC = guaranteed_get(Key, State),
     % discard obsolete values w.r.t the causal context
@@ -286,6 +299,20 @@ handle_command({write, ReqID, Operation, Key, Value, Context}, _Sender, State) -
 
 
 handle_command({replicate, ReqID, Key, NewDCC}, _Sender, State) ->
+
+
+% debug
+    RN = dotted_db_utils:replica_nodes(Key),
+    This = {State#state.id, node()},
+    case lists:member(This, RN) of
+        true   ->
+            ok;
+        false ->
+            lager:info("(2)IxNd: ~p work vnode for key ~p in ~p", [This, Key, RN])
+    end,
+
+
+
     NodeClock = dcc:add(State#state.clock, NewDCC),
     % get and fill the causal history of the local key
     DiskDCC = guaranteed_get(Key, State),
@@ -319,7 +346,6 @@ handle_command({replicate, ReqID, Key, NewDCC}, _Sender, State) ->
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 handle_command({sync_start, ReqID, _Peer={PIndex,_}}, _Sender, State) ->
-    lager:info("new syn req"),
     % get the "Peer"'s entry from this node clock
     RemoteEntry = bvv:get(PIndex, State#state.clock),
     % send a sync message to that node
@@ -343,6 +369,15 @@ handle_command({sync_request, ReqID, RemoteID, RemoteEntry={Base,_Dots}}, _Sende
     RelevantMissingObjects = [{Key, guaranteed_get(Key, State)} || Key <- RelevantMissingKeys],
     % strip any unnecessary causal information to save network bandwidth
     StrippedObjects = [{Key, dcc:strip(DCC, State#state.clock)} || {Key,DCC} <- RelevantMissingObjects],
+
+% debug
+    case orddict:find(RemoteID, State#state.replicated) of
+        error   ->
+            lager:info("IxNd: ~p new entry in replicated VV for ~p", [{State#state.id, node()}, RemoteID]);
+        {ok, _} ->
+            ok
+    end,
+
     % update the replicated clock to reflect what the asking node has about the local node
     Replicated = vv:add(State#state.replicated, {RemoteID, Base}),
     % get that maximum dot generated at this node that is also known by all peers of this node (relevant nodes)
@@ -547,6 +582,10 @@ is_empty(State) ->
     {Bool, State}.
 
 delete(State) ->
+    
+    lager:info("IxNd:~p // Clock:~p // KL:~p // VV:~p", 
+        [{State#state.index, node()}, State#state.clock, State#state.keylog, State#state.replicated] ),
+
     % lager:debug("DELS: {~p, ~p}",[State#state.index, node()]),
     case dotted_db_storage:drop(State#state.storage) of
         {ok, Storage} ->

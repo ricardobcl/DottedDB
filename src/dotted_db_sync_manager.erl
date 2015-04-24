@@ -40,7 +40,8 @@ disable() ->
 -spec init([]) -> {ok, state()}.
 init([]) ->
     % Tick = app_helper:get_env(dotted_db, anti_entropy_tick, ?TICK),
-    Tick = 4294967292,
+    % Tick = 4294967292,
+    Tick = ?TICK,
     lager:info("Tick: ~p", [Tick]),
     schedule_tick(Tick),
     % LocalVnodes = dotted_db_utils:vnodes_from_node(node()),
@@ -105,12 +106,13 @@ schedule_tick(Tick) ->
 tick(State) ->
     lager:debug("Start new tick for AAE Sync"),
     ReqID = dotted_db_utils:make_request_id(),
-    case dotted_db_utils:vnodes_from_node(node()) of
+    ThisNode = node(),
+    case dotted_db_utils:vnodes_from_node(ThisNode) of
         [] ->
             lager:warning("No vnodes to do AAE sync on node ~p", [node()]),
             {ok, State};
         Vnodes ->
-            VN = case Vnodes of
+            VN = {_, ThisNode} = case Vnodes of
                 [Vnode] -> Vnode;
                 _ -> dotted_db_utils:random_from_list(Vnodes)
             end,

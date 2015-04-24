@@ -10,13 +10,13 @@ make_request_id() ->
 
 -spec primary_node(key()) -> index_node().
 primary_node(Key) ->
-    DocIdx = riak_core_util:chash_key({?DEFAULT_BUCKET, Key}),
+    DocIdx = riak_core_util:chash_key(Key),
     {IndexNode, _Type}  = riak_core_apl:first_up(DocIdx, dotted_db),
     IndexNode.
 
 -spec replica_nodes(key()) -> [index_node()].
 replica_nodes(Key) ->
-    DocIdx = riak_core_util:chash_key({?DEFAULT_BUCKET, Key}),
+    DocIdx = riak_core_util:chash_key(Key),
     [IndexNode || {IndexNode, _Type} <- riak_core_apl:get_primary_apl(DocIdx, ?REPLICATION_FACTOR, dotted_db)].
 
 -spec replica_nodes_indices(key()) -> [index()].
