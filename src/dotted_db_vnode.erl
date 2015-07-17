@@ -318,10 +318,16 @@ handle_command({replicate, ReqID, Key, NewDCC}, _Sender, State) ->
     DiskDCC = guaranteed_get(Key, State),
     % synchronize both objects
     FinalDCC = dcc:sync(NewDCC, DiskDCC),
-    % strip the causality
-    StrippedDCC = dcc:strip(FinalDCC, NodeClock),
-    % save the new key DCC, while stripping the unnecessary causality
-    ok = dotted_db_storage:put(State#state.storage, Key, StrippedDCC),
+    % test if the FinalDCC has newer information
+    case FinalDCC == DiskDCC of
+        true -> 
+            lager:debug("Replicated object is ignored (already seen)");
+        false ->
+            % strip the causality
+            StrippedDCC = dcc:strip(FinalDCC, NodeClock),
+            % save the new key DCC, while stripping the unnecessary causality
+            ok = dotted_db_storage:put(State#state.storage, Key, StrippedDCC)
+    end,
     % ?PRINT({Key, NewDCC,StrippedDCC}),
     % Optionally collect stats
     case State#state.stats of
