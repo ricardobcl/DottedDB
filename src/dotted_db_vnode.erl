@@ -183,7 +183,7 @@ handle_command({read, ReqID, Key}, _Sender, State) ->
                 % there is no key K in this node
                 % create an empty "object" and fill its causality with the node clock
                 % this is needed to ensure that deletes "win" over old writes at the coordinator
-                {ok, dcc:fill(dcc:new(), State#state.clock)};
+                {ok, fill_clock(Key, dcc:new(), State#state.clock)};
             {error, Error} ->
                 % some unexpected error
                 lager:error("Error reading a key from storage (command read): ~p", [Error]),
@@ -191,7 +191,7 @@ handle_command({read, ReqID, Key}, _Sender, State) ->
                 {error, Error};
             DCC ->
                 % get and fill the causal history of the local object
-                {ok, dcc:fill(DCC, State#state.clock)}
+                {ok, fill_clock(Key, DCC, State#state.clock)}
         end,
     % Optionally collect stats
     case State#state.stats of
@@ -234,7 +234,7 @@ handle_command({write, ReqID, Operation, Key, Value, Context}, _Sender, State) -
         true   ->
             ok;
         false ->
-            lager:info("IxNd: ~p work vnode for key ~p in ~p", [This, Key, RN])
+            lager:info("WRONG NODE!!!! IxNd: ~p work vnode for key ~p in ~p", [This, Key, RN])
     end,
 
 
@@ -308,7 +308,7 @@ handle_command({replicate, ReqID, Key, NewDCC}, _Sender, State) ->
         true   ->
             ok;
         false ->
-            lager:info("(2)IxNd: ~p work vnode for key ~p in ~p", [This, Key, RN])
+            lager:info("WRONG NODE!!! (2)IxNd: ~p work vnode for key ~p in ~p", [This, Key, RN])
     end,
 
 
@@ -371,6 +371,8 @@ handle_command({sync_request, ReqID, RemoteID, RemoteEntry={Base,_Dots}}, _Sende
     StrippedObjects = [{Key, dcc:strip(DCC, State#state.clock)} || {Key,DCC} <- RelevantMissingObjects],
 
 % debug
+    % lager:info("Total Missing: ~p // Relevant: ~p", [length(MissingKeys), length(RelevantMissingKeys)]),
+
     case orddict:find(RemoteID, State#state.replicated) of
         error   ->
             lager:info("IxNd: ~p new entry in replicated VV for ~p", [{State#state.id, node()}, RemoteID]);
@@ -405,6 +407,8 @@ handle_command({sync_request, ReqID, RemoteID, RemoteEntry={Base,_Dots}}, _Sende
     % Optionally collect stats
     case State#state.stats of
         true ->
+            
+
             {_B1,K1} = KeyLog,
             dotted_db_stats:notify({histogram, bvv_size}, size(term_to_binary(State#state.clock))),
             dotted_db_stats:notify({histogram, kl_len}, length(K1)),
@@ -415,9 +419,15 @@ handle_command({sync_request, ReqID, RemoteID, RemoteEntry={Base,_Dots}}, _Sende
             MetaS = byte_size(term_to_binary(DCCS)),
             CCF = lists:sum([length(DCC) || DCC <- DCCF]),
             CCS = lists:sum([length(DCC) || DCC <- DCCS]),
-            dotted_db_stats:update_key_meta(State#state.index, length(LocalObjectsKLFull), MetaF, MetaS, CCF, CCS);
+            dotted_db_stats:update_key_meta(State#state.index, length(LocalObjectsKLFull), MetaF, MetaS, CCF, CCS),
+
+            ok = exometer:update([dotted_db, glc, entries, length], CCS/max(1,length(DCCS))),
+            ok = exometer:update([dotted_db, sync, total], 1),
+            ok = exometer:update([dotted_db, sync, relevant_keys], 100*length(RelevantMissingKeys)/max(1,length(MissingKeys))),
+
+            ok;
             % % get stats to return to the Sync FSM: {replicated vv, keylog, keylog length, b2a_number, b2a_size, b2a_size_full}
-            % FilledObjects = [{Key, dcc:fill(DCC, State#state.clock)} || {Key,DCC} <- RelevantMissingObjects],
+            % FilledObjects = [{Key, fill_clock(Key, DCC, State#state.clock)} || {Key,DCC} <- RelevantMissingObjects],
             % #{
             %     b2a_number              => length(StrippedObjects),
             %     b2a_size                => size(term_to_binary(StrippedObjects)),
@@ -444,7 +454,7 @@ handle_command({sync_response, ReqID, RespondingNodeID, RemoteNodeClockBase, Mis
     % get the local objects corresponding to the received objects and fill the
     % causal history for all of them
     FilledObjects =
-        [{ Key, dcc:fill(DCC, RemoteNodeClockBase), guaranteed_get(Key, State) }
+        [{ Key, fill_clock(Key, DCC, RemoteNodeClockBase), guaranteed_get(Key, State) }
          || {Key,DCC} <- MissingObjects],
     % synchronize / merge the remote and local objects
     SyncedObjects = [{ Key, dcc:sync(Remote, Local), Local } || {Key, Remote, Local} <- FilledObjects],
@@ -613,6 +623,10 @@ terminate(_Reason, State) ->
 %% Private
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
+
+fill_clock(Key, LocalClock, GlobalClock) ->
+    dcc:fill(LocalClock, GlobalClock, dotted_db_utils:replica_nodes_indices(Key)).
+
 % @doc Returns the value (DCC) associated with the Key.
 % By default, we want to return a filled causality, unless we get a storage error.
 % If the key does not exists or for some reason, the storage returns an
@@ -621,7 +635,7 @@ guaranteed_get(Key, State) ->
     case dotted_db_storage:get(State#state.storage, Key) of
         {error, not_found} ->
             % there is no key K in this node
-            dcc:fill(dcc:new(), State#state.clock);
+            fill_clock(Key, dcc:new(), State#state.clock);
         {error, Error} ->
             % some unexpected error
             lager:error("Error reading a key from storage (guaranteed GET): ~p", [Error]),
@@ -629,7 +643,7 @@ guaranteed_get(Key, State) ->
             dcc:new();
         DCC ->
             % get and fill the causal history of the local object
-            dcc:fill(DCC, State#state.clock)
+            fill_clock(Key, DCC, State#state.clock)
     end.
 
 % @doc Saves the relevant vnode state to the storage.

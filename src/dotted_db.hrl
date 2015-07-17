@@ -10,7 +10,7 @@
 -define(DELETE_OP, delete_op).
 -define(WRITE_OP, write_op).
 
--define(TICK, 200).
+-define(TICK, 100).
 
 %% Options for read requests.
 -define(OPT_DO_RR, do_read_repair).
