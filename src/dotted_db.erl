@@ -6,6 +6,7 @@
 -export([
          ping/0,
          vstate/0,
+         vstate/1,
          vstates/0,
          new_client/0,
          new_client/1,
@@ -53,6 +54,10 @@ vstate() ->
     DocIdx = riak_core_util:chash_key({<<"get_vnode_state">>, term_to_binary(now())}),
     PrefList = riak_core_apl:get_primary_apl(DocIdx, 1, dotted_db),
     [{IndexNode, _Type}] = PrefList,
+    riak_core_vnode_master:sync_spawn_command(IndexNode, get_vnode_state, dotted_db_vnode_master).
+
+%% @doc Get the state from a specific vnode.
+vstate(IndexNode) ->
     riak_core_vnode_master:sync_spawn_command(IndexNode, get_vnode_state, dotted_db_vnode_master).
 
 
