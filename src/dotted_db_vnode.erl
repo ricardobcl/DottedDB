@@ -55,7 +55,9 @@
         % DETS table that stores in disk the vnode state
         dets        :: dets(),
         % a flag to collect or not stats
-        stats       :: boolean()
+        stats       :: boolean(),
+        % syncs stats
+        syncs       :: [{id(), integer(), integer(), os:timestamp(), os:timestamp()}]
     }).
 
 
@@ -166,7 +168,8 @@ init([Index]) ->
         storage     = Storage,
         dets        = Dets,
         updates_mem = 0,
-        stats       = true
+        stats       = true,
+        syncs       = initialize_syncs(Index)
         }
     }.
 
@@ -281,15 +284,15 @@ handle_command({write, ReqID, Operation, Key, Value, Context}, _Sender, State) -
     % Optionally collect stats
     case State#state.stats of
         true ->
-            dotted_db_stats:notify({histogram, bvv_size}, size(term_to_binary(NodeClock))),
-            {_, List1} = KeyLog,
-            dotted_db_stats:notify({histogram, kl_len}, length(List1)),
+            % dotted_db_stats:notify({histogram, bvv_size}, size(term_to_binary(NodeClock))),
+            % {_, List1} = KeyLog,
+            % dotted_db_stats:notify({histogram, kl_len}, length(List1)),
 
             % MetaF = byte_size(term_to_binary(dcc:context(NewDCC))),
             % MetaS = byte_size(term_to_binary(dcc:context(StrippedDCC))),
             % CCF = length(dcc:context(NewDCC)),
             % CCS = length(dcc:context(StrippedDCC)),
-            % dotted_db_stats:update_key_meta(State#state.index, 1, MetaF, MetaS, CCF, CCS);
+            % dotted_db_stats:update_key_meta(State#state.index, 1, MetaF, MetaS, CCF, CCS),
             ok;
         false -> ok
     end,
@@ -328,16 +331,15 @@ handle_command({replicate, ReqID, Key, NewDCC}, _Sender, State) ->
             % save the new key DCC, while stripping the unnecessary causality
             ok = dotted_db_storage:put(State#state.storage, Key, StrippedDCC)
     end,
-    % ?PRINT({Key, NewDCC,StrippedDCC}),
     % Optionally collect stats
-    case State#state.stats of
+    case State#state.stats andalso FinalDCC =/= DiskDCC of
         true ->
-
+            % StrippedDCC2 = dcc:strip(FinalDCC, NodeClock),
             % MetaF = byte_size(term_to_binary(dcc:context(FinalDCC))),
-            % MetaS = byte_size(term_to_binary(dcc:context(StrippedDCC))),
+            % MetaS = byte_size(term_to_binary(dcc:context(StrippedDCC2))),
             % CCF = length(dcc:context(FinalDCC)),
-            % CCS = length(dcc:context(StrippedDCC)),
-            % dotted_db_stats:update_key_meta(State#state.index, 1, MetaF, MetaS, CCF, CCS);
+            % CCS = length(dcc:context(StrippedDCC2)),
+            % dotted_db_stats:update_key_meta(State#state.index, 1, MetaF, MetaS, CCF, CCS),
             ok;
         false -> ok
     end,
@@ -408,9 +410,9 @@ handle_command({sync_request, ReqID, RemoteID, RemoteEntry={Base,_Dots}}, _Sende
     Replicated = vv:add(State#state.replicated, {RemoteID, Base}),
     % get that maximum dot generated at this node that is also known by all peers of this node (relevant nodes)
     MinimumDot = vv:min(Replicated),
-    % remove the keys from the keylog that have a dot, corresponding to their position, smaller than the
+    % remove the keys from the keylog that have a dot (corresponding to their position) smaller than the
     % minimum dot, i.e., this update is known by all nodes that replicate it and therefore can be removed
-    % form the keylog; for simplicity, remove only keys that start at the head, to actually shrink the log
+    % from the keylog; for simplicity, remove only keys that start at the head, to actually shrink the log
     % and increment the base counter.
     {RemovedKeys, KeyLog} =
         case MinimumDot > KBase of
@@ -431,7 +433,6 @@ handle_command({sync_request, ReqID, RemoteID, RemoteEntry={Base,_Dots}}, _Sende
     % Optionally collect stats
     case State#state.stats of
         true ->
-            
 
             {_B1,K1} = KeyLog,
             dotted_db_stats:notify({histogram, bvv_size}, size(term_to_binary(State#state.clock))),
@@ -445,9 +446,9 @@ handle_command({sync_request, ReqID, RemoteID, RemoteEntry={Base,_Dots}}, _Sende
             CCS = lists:sum([length(DCC) || DCC <- DCCS]),
             dotted_db_stats:update_key_meta(State#state.index, length(LocalObjectsKLFull), MetaF, MetaS, CCF, CCS),
 
-            ok = exometer:update([dotted_db, glc, entries, length], CCS/max(1,length(DCCS))),
-            ok = exometer:update([dotted_db, sync, total], 1),
-            ok = exometer:update([dotted_db, sync, relevant_keys], 100*length(RelevantMissingKeys)/max(1,length(MissingKeys))),
+            % ok = exometer:update([dotted_db, glc, entries, length], CCS/max(1,length(DCCS))),
+            % ok = exometer:update([dotted_db, sync, total], 1),
+            % ok = exometer:update([dotted_db, sync, relevant_keys], 100*length(RelevantMissingKeys)/max(1,length(MissingKeys))),
 
             ok;
             % % get stats to return to the Sync FSM: {replicated vv, keylog, keylog length, b2a_number, b2a_size, b2a_size_full}
@@ -466,9 +467,18 @@ handle_command({sync_request, ReqID, RemoteID, RemoteEntry={Base,_Dots}}, _Sende
             % };
         false -> ok
     end,
+    % update this node sync stats
+    NewLastAttempt = os:timestamp(),
+    Fun = fun ({PI, ToCounter, FromCounter, LastAttempt, LastExchange}) ->
+            case PI =:= RemoteID of
+                true -> {PI, ToCounter, FromCounter + 1, NewLastAttempt, LastExchange};
+                false -> {PI, ToCounter, FromCounter, LastAttempt, LastExchange}
+            end
+          end,
+    Syncs = lists:map(Fun, State#state.syncs),
     % send the final objects and the base (contiguous) dots of the node clock to the asking node
     {reply, {ok, ReqID, State#state.id, bvv:base(State#state.clock), StrippedObjects},
-        State#state{replicated = Replicated, keylog = KeyLog}};
+        State#state{replicated = Replicated, keylog = KeyLog, syncs = Syncs}};
 
 handle_command({sync_response, ReqID, RespondingNodeID, RemoteNodeClockBase, MissingObjects}, _Sender, State) ->
     % replace the current entry in the node clock for the responding clock with
@@ -495,13 +505,26 @@ handle_command({sync_response, ReqID, RespondingNodeID, RemoteNodeClockBase, Mis
             MetaSize = byte_size(term_to_binary(Meta)) + byte_size(term_to_binary(RemoteNodeClockBase)),
             PayloadSize = byte_size(term_to_binary(Payload)),
             Size2 = dotted_db_utils:human_filesize(MetaSize),
-            lager:info("MissingObjects: ~p    E.bytes: ~s~n", [length(MissingObjects), Size2]),
+            if
+                length(MissingObjects) > 0 -> 
+                    lager:info("MissingObjects: ~p    E.bytes: ~s~n", [length(MissingObjects), Size2]);
+                true -> ok
+            end,
             Repaired = length(RealMissingObjects),
             Sent = length(MissingObjects),
             dotted_db_stats:sync_complete(State#state.index, Repaired, Sent, {PayloadSize, MetaSize});
         false -> ok
     end,
-    {reply, {ok, ReqID}, State#state{clock = NodeClock}};
+    % update this node sync stats
+    NewLastExchange = os:timestamp(),
+    Fun = fun ({PI, ToCounter, FromCounter, LastAttempt, LastExchange}) ->
+            case PI =:= RespondingNodeID of
+                true -> {PI, ToCounter, FromCounter, LastAttempt, NewLastExchange};
+                false -> {PI, ToCounter, FromCounter, LastAttempt, LastExchange}
+            end
+          end,
+    Syncs = lists:map(Fun, State#state.syncs),
+    {reply, {ok, ReqID}, State#state{clock = NodeClock, syncs = Syncs}};
 
 
 
@@ -710,6 +733,20 @@ initialize_replicated(Index) ->
     Replicated = lists:foldl(fun (ID,VV) -> vv:add(VV,{ID,0}) end , vv:new(), PeerIDs),
     (?REPLICATION_FACTOR-1)*2 = length(Replicated),
     Replicated.
+
+
+% @doc Initializes the "sync" stats for peers of this vnode.
+initialize_syncs(Index) ->
+    % get this node's peers, i.e., all nodes that replicates any subset of local keys.
+    PeerIDs = [ ID || {ID, _Node} <- dotted_db_utils:peers(Index)],
+    % for replication factor N = 3, the numbers of peers should be 4 (2 vnodes before and 2 after).
+    (?REPLICATION_FACTOR-1)*2 = length(PeerIDs),
+    Now = os:timestamp(),
+    Syncs = lists:foldl(fun (ID, List) -> [{ID,0,0,Now,Now} | List] end , [], PeerIDs),
+    (?REPLICATION_FACTOR-1)*2 = length(Syncs),
+    Syncs.
+
+
 
 % @doc Returns the Storage for this vnode.
 open_storage(Index) ->

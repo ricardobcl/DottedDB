@@ -25,8 +25,8 @@
 
 -include_lib("dotted_db.hrl").
 
--define(FLUSH_INTERVAL_MS, 10000). % 10000 milliseconds
--define(FLUSH_INTERVAL, 10). % 10 seconds
+-define(FLUSH_INTERVAL_MS, 5000). % 5000 milliseconds
+-define(FLUSH_INTERVAL, 5). % 5 seconds
 -define(WARN_INTERVAL, 1000). % Warn once a second
 -define(CURRENT_DIR, "current").
 -define(ETS, ets_dotted_db_entropy).
@@ -137,6 +137,7 @@ compute_vnode_info() ->
 sync_complete(Index, Repaired, Sent, {PayloadSize, MetaSize}) ->
     update_ets_info({index, Index}, {sync_complete, Repaired, Sent, {PayloadSize, MetaSize}}).
 
+update_key_meta(_, 0, _, _, _, _) -> ok;
 update_key_meta(Index, Count, MetaFull, MetaStrip, MetaFullLen, MetaStripLen) ->
     update_ets_info({index, Index}, {update_key_meta, Count, MetaFull, MetaStrip, MetaFullLen, MetaStripLen}).
 

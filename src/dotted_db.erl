@@ -523,31 +523,39 @@ decode_get_reply({BinValues, Context}) ->
 process_vnode_states(States) ->
     Results  = [ process_vnode_state(State) || State <- States ],
     Dots        = [ begin #{dots        := Res} = R , Res end || R<- Results ],
-    ClockSize   = [ begin #{clock_size  := Res} = R , Res end || R<- Results ],
+    % ClockSize   = [ begin #{clock_size  := Res} = R , Res end || R<- Results ],
     Keys        = [ begin #{keys        := Res} = R , Res end || R<- Results ],
-    KLSize      = [ begin #{kl_size     := Res} = R , Res end || R<- Results ],
+    % KLSize      = [ begin #{kl_size     := Res} = R , Res end || R<- Results ],
+    % Syncs       = [ begin #{syncs       := Res} = R , Res end || R<- Results ],
     io:format("\n\n========= Vnodes ==========   \n"),
     io:format("\t Number of vnodes                  \t ~p\n",[length(States)]),
     io:format("\t Total     average miss_dots       \t ~p\n",[average(Dots)]),
     io:format("\t All       average miss_dots       \t ~p\n",[lists:sort(Dots)]),
-    io:format("\t Average   clock size              \t ~p\n",[average(ClockSize)]),
-    io:format("\t All       clock size              \t ~p\n",[lists:sort(ClockSize)]),
+    % io:format("\t Average   clock size              \t ~p\n",[average(ClockSize)]),
+    % io:format("\t All       clock size              \t ~p\n",[lists:sort(ClockSize)]),
     io:format("\t Average   # keys in KL            \t ~p\n",[average(Keys)]),
     io:format("\t Per vnode # keys in KL            \t ~p\n",[lists:sort(Keys)]),
-    io:format("\t Average   size keys in KL         \t ~p\n",[average(KLSize)]),
-    io:format("\t Per vnode size keys in KL         \t ~p\n",[lists:sort(KLSize)]),
+    % io:format("\t Average   size keys in KL         \t ~p\n",[average(KLSize)]),
+    % io:format("\t Per vnode size keys in KL         \t ~p\n",[lists:sort(KLSize)]),
+    % io:format("\t Syncs                             \t ~p\n",[Syncs]),
     ok.
 
-process_vnode_state({Index, _Node, {ok,{state, _Id, Index, NodeClock, _Storage,
-                    _Replicated, KeyLog, _Dets, _Updates_mem, _Stats}}}) ->
+process_vnode_state({Index, _Node, {ok,{state, _Id, Index, _Node, NodeClock, _Storage,
+                    _Replicated, KeyLog, _Updates_mem, _Dets, _Stats, Syncs}}}) ->
     % ?PRINT(NodeClock),
     MissingDots = [ miss_dots(Entry) || {_,Entry} <- NodeClock ],
     {Keys, Size} = KeyLog,
+    Now = os:timestamp(),
+    Fun = fun ({PI, ToCounter, FromCounter, LastAttempt, LastExchange}) ->
+                {PI, ToCounter, FromCounter, timer:now_diff(Now, LastAttempt)/1000, timer:now_diff(Now, LastExchange)/1000}
+          end,
+    Syncs2 = lists:map(Fun, Syncs),
     #{   
           dots          => average(MissingDots)
         , clock_size    => byte_size(term_to_binary(NodeClock))
         , keys          => Keys %length(Keys)
         , kl_size       => Size %byte_size(term_to_binary(KeyLog))
+        , syncs         => Syncs2
     }.
 
 
@@ -569,7 +577,7 @@ average(X) ->
 average([H|T], Length, Sum) ->
     average(T, Length + 1, Sum + H);
 average([], Length, Sum) ->
-    Sum / Length.
+    Sum / max(1,Length).
 
         % % node id used for in logical clocks
         % id          :: id(),
