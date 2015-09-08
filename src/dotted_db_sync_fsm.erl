@@ -65,9 +65,6 @@ sync_request({ok, ReqID, RemoteNodeID, Peer, RemoteEntry}, State) ->
 sync_response(timeout, State) ->
     State#state.from ! {State#state.req_id, timeout},
     {stop, normal, State};
-sync_response({ok, ReqID, _, _, []}, State) ->
-    State#state.from ! {ReqID, ok, sync},
-    {stop, normal, State};
 sync_response({ok, ReqID, RemoteNodeID, RemoteNodeClockBase, MissingObjects}, State=#state{vnode = Vnode}) ->
     dotted_db_vnode:sync_response( [Vnode], ReqID, RemoteNodeID, RemoteNodeClockBase, MissingObjects),
     {next_state, sync_ack, State, State#state.timeout}.
