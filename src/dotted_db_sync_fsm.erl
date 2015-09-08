@@ -50,23 +50,16 @@ init([ReqID, From, Vnode]) ->
 %% @doc
 sync_start(timeout, State=#state{   req_id  = ReqID,
                                     vnode   = Vnode}) ->
-    ThisNode = node(),
-    % get the ring index for thing vnode
-    {Index, ThisNode} = Vnode,
-    % get this node's peers, i.e., all nodes that replicates any subset of local keys
-    Peers = dotted_db_utils:peers(Index),
-    % choose a random node from that list
-    Peer = dotted_db_utils:random_from_list(Peers),
-    dotted_db_vnode:sync_start([Vnode], Peer, ReqID),
-    {next_state, sync_request, State#state{peer=Peer}, State#state.timeout}.
+    dotted_db_vnode:sync_start([Vnode], ReqID),
+    {next_state, sync_request, State, State#state.timeout}.
 
 %% @doc
 sync_request(timeout, State) ->
     State#state.from ! {State#state.req_id, timeout},
     {stop, normal, State};
-sync_request({ok, ReqID, RemoteNodeID, RemoteEntry}, State=#state{peer = Peer}) ->
+sync_request({ok, ReqID, RemoteNodeID, Peer, RemoteEntry}, State) ->
     dotted_db_vnode:sync_request(Peer, ReqID, RemoteNodeID, RemoteEntry),
-    {next_state, sync_response, State, State#state.timeout}.
+    {next_state, sync_response, State#state{peer=Peer}, State#state.timeout}.
 
 %% @doc
 sync_response(timeout, State) ->

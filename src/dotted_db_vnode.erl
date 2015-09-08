@@ -24,7 +24,7 @@
          repair/3,
          write/6,
          replicate/4,
-         sync_start/3,
+         sync_start/2,
          sync_request/4,
          sync_response/5
         ]).
@@ -99,9 +99,9 @@ replicate(ReplicaNodes, ReqID, Key, DCC) ->
                                    {fsm, undefined, self()},
                                    ?MASTER).
 
-sync_start(Node, Peer, ReqID) ->
+sync_start(Node, ReqID) ->
     riak_core_vnode_master:command(Node,
-                                   {sync_start, ReqID, Peer},
+                                   {sync_start, ReqID},
                                    {fsm, undefined, self()},
                                    ?MASTER).
 
@@ -351,11 +351,29 @@ handle_command({replicate, ReqID, Key, NewDCC}, _Sender, State) ->
 %%% SYNCHRONIZING
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-handle_command({sync_start, ReqID, _Peer={PIndex,_}}, _Sender, State) ->
+handle_command({sync_start, ReqID}, _Sender, State) ->
+    % % choose the peer node that this node thinks is most outdated
+    % PeerIndex = vv:min_key(State#state.replicated),
+    % % get the "Peer"'s entry from this node clock
+    % RemoteEntry = bvv:get(PeerIndex, State#state.clock),
+    % % get the machine from where the peer is
+    % [Peer] = [ {ID, Node} || {ID, Node} <- dotted_db_utils:peers(State#state.id), ID =:= PeerIndex],
+
+    % choose a peer at random
+    Peer = {PeerIndex, _} = dotted_db_utils:random_from_list(dotted_db_utils:peers(State#state.id)),
     % get the "Peer"'s entry from this node clock
-    RemoteEntry = bvv:get(PIndex, State#state.clock),
+    RemoteEntry = bvv:get(PeerIndex, State#state.clock),
+    % update this node sync stats
+    NewLastAttempt = os:timestamp(),
+    Fun = fun ({PI, ToCounter, FromCounter, LastAttempt, LastExchange}) ->
+            case PI =:= PeerIndex of
+                true -> {PI, ToCounter + 1, FromCounter, NewLastAttempt, LastExchange};
+                false -> {PI, ToCounter, FromCounter, LastAttempt, LastExchange}
+            end
+          end,
+    Syncs = lists:map(Fun, State#state.syncs),
     % send a sync message to that node
-    {reply, {ok, ReqID, State#state.id, RemoteEntry}, State};
+    {reply, {ok, ReqID, State#state.id, Peer, RemoteEntry}, State#state{syncs = Syncs}};
 
 
 handle_command({sync_request, ReqID, RemoteID, RemoteEntry={Base,_Dots}}, _Sender, State) ->
