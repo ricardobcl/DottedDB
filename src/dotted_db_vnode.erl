@@ -559,7 +559,8 @@ handle_coverage(vnode_state, _KeySpaces, {_, RefId, _}, State) ->
 %     {reply, {RefId, {ok, Users}}, State};
 
 handle_coverage(Req, _KeySpaces, _Sender, State) ->
-    lager:warning("unknown coverage received ~p", [Req]),
+    % lager:warning("unknown coverage received ~p", [Req]),
+    lager:info("unknown coverage received ~p", [Req]),
     {noreply, State}.
 
 
@@ -593,6 +594,7 @@ handle_handoff_command(Cmd, Sender, State) when
 
 %% For coordinating writes, do it locally and forward the replication
 handle_handoff_command(Cmd={write, ReqID, _, Key, _, _}, Sender, State) ->
+    lager:info("HAND_WRITE: {~p, ~p} // Key: ~p",[State#state.index, node(), Key]),
     % do the local coordinating write
     {reply, {ok, ReqID, NewDCC}, State2} = handle_command(Cmd, Sender, State),
     % send the ack to the PUT_FSM
@@ -608,6 +610,14 @@ handle_handoff_command(Cmd, Sender, State) ->
 
 handoff_starting(TargetNode, State) ->
     lager:info("HAND_START: {~p, ~p} to ~p",[State#state.index, node(), TargetNode]),
+    %% save the vnode state, if not empty
+    case State#state.clock =:= bvv:new() of
+        true -> ok;
+        false ->
+            Key = {?DEFAULT_BUCKET, {?VNODE_STATE_KEY, State#state.index}},
+            NodeState = {State#state.clock, State#state.keylog, State#state.replicated},
+            dotted_db_storage:put(State#state.storage, Key, NodeState)
+    end,
     {true, State}.
 
 handoff_cancelled(State) ->
@@ -617,44 +627,48 @@ handoff_finished(_TargetNode, State) ->
     {ok, State}.
 
 handle_handoff_data(Data, State) ->
+    NodeKey = {?DEFAULT_BUCKET, {?VNODE_STATE_KEY, State#state.index}},
     % decode the data received
-    {Key, Obj} = dotted_db_utils:decode_kv(Data),
-    % % add the clock from the object to the node clock
-    % NodeClock = dcc:add(State#state.clock, Obj),
-    % % get and fill the causal history of the local key
-    % NewObj = guaranteed_get(Key, State),
-    % % synchronize both objects
-    % FinalObj = dcc:sync(Obj, NewObj),
-    % % save the new key DCC, while stripping the unnecessary causality
-    % ok = dotted_db_storage:put(State#state.storage, Key, dcc:strip(FinalObj, NodeClock)),
-    {reply, {ok, _}, State2} = handle_command({replicate, dummy_req_id, Key, Obj}, undefined, State),
-    {reply, ok, State2}.
+    NewState = 
+        case dotted_db_utils:decode_kv(Data) of
+            {NodeKey, {NodeClock, KeyLog, Replicated}} ->
+                NodeClock2 = bvv:join(NodeClock, State#state.clock),
+                State#state{clock = NodeClock2, keylog = KeyLog, replicated = Replicated};
+            {Key, Obj} ->
+                {reply, {ok, _}, State2} = handle_command({replicate, dummy_req_id, Key, Obj}, undefined, State),
+                State2
+        end,
+    {reply, ok, NewState}.
 
 encode_handoff_item(Key, Val) ->
     dotted_db_utils:encode_kv({Key,Val}).
 
 is_empty(State) ->
-    Bool = dotted_db_storage:is_empty(State#state.storage),
-    lager:info("IS_EMPTY: ~p on {~p, ~p}",[Bool, State#state.index, node()]),
-    {Bool, State}.
+    case dotted_db_storage:is_empty(State#state.storage) of
+        true ->
+            {true, State};
+        false ->
+            lager:info("IS_EMPTY: not empty -> {~p, ~p}",[State#state.index, node()]),
+            {false, State}
+    end.
 
 delete(State) ->
-    
-    lager:info("IxNd:~p // Clock:~p // KL:~p // VV:~p", 
-        [{State#state.index, node()}, State#state.clock, State#state.keylog, State#state.replicated] ),
-
-    % lager:debug("DELS: {~p, ~p}",[State#state.index, node()]),
-    case dotted_db_storage:drop(State#state.storage) of
-        {ok, Storage} ->
-            lager:info("GOOD_DROP: {~p, ~p}",[State#state.index, node()]),
-            {ok, State#state{storage=Storage}};
-            % {ok, State};
-        {error, Reason, Storage} ->
-            lager:info("BAD_DROP: {~p, ~p}  Reason: ~p",[State#state.index, node(), Reason]),
-            % lager:warning("Error on destroying storage: ~p",[Reason]),
-            {ok, State#state{storage=Storage}}
-            % {ok, State}
-    end.
+    {Good, Storage1} = 
+        case dotted_db_storage:drop(State#state.storage) of
+            {ok, Storage} ->
+                {true, Storage};
+            {error, Reason, Storage} ->
+                lager:info("BAD_DROP: {~p, ~p}  Reason: ~p",[State#state.index, node(), Reason]),
+                {false, Storage}
+        end,
+    case State#state.clock =/= [] andalso Good of
+        true  -> 
+            lager:info("IxNd:~p // Clock:~p // KL:~p // VV:~p",
+                [{State#state.index, node()}, State#state.clock, State#state.keylog, State#state.replicated] ),
+            lager:info("GOOD_DROP: {~p, ~p}",[State#state.index, node()]);
+        false -> ok
+    end,
+    {ok, State#state{storage=Storage1}}.
 
 handle_exit(_Pid, _Reason, State) ->
     {noreply, State}.
