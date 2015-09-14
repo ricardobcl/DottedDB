@@ -206,18 +206,6 @@ handle_command({read, ReqID, Key}, _Sender, State) ->
 
 
 handle_command({repair, BKey, NewDCC}, Sender, State) ->
-    % NodeClock = dcc:add(State#state.clock, NewDCC),
-    % % get and fill the causal history of the local key
-    % DiskDCC = guaranteed_get(BKey, State),
-    % % synchronize both objects
-    % FinalDCC = dcc:sync(NewDCC, DiskDCC),
-    % % save the new key DCC, while stripping the unnecessary causality
-    % ok = dotted_db_storage:put(State#state.storage, BKey, dcc:strip(FinalDCC, NodeClock)),
-    % % Optionally collect stats
-    % case State#state.stats of
-    %     true -> ok;
-    %     false -> ok
-    % end,
     {reply, {ok, dummy_req_id}, State2} =
         handle_command({replicate, dummy_req_id, BKey, NewDCC}, Sender, State),
     {noreply, State2};
@@ -230,7 +218,7 @@ handle_command({repair, BKey, NewDCC}, Sender, State) ->
 
 handle_command({write, ReqID, Operation, Key, Value, Context}, _Sender, State) ->
 
-% debug
+    % debug
     RN = dotted_db_utils:replica_nodes(Key),
     This = {State#state.id, node()},
     case lists:member(This, RN) of
@@ -239,8 +227,6 @@ handle_command({write, ReqID, Operation, Key, Value, Context}, _Sender, State) -
         false ->
             lager:info("WRONG NODE!!!! IxNd: ~p work vnode for key ~p in ~p", [This, Key, RN])
     end,
-
-
 
     % get and fill the causal history of the local key
     DiskDCC = guaranteed_get(Key, State),
@@ -280,7 +266,6 @@ handle_command({write, ReqID, Operation, Key, Value, Context}, _Sender, State) -
             % restart the counter
             0
     end,
-    % ?PRINT({Key, Value, Context, StrippedDCC}),
     % Optionally collect stats
     case State#state.stats of
         true ->
@@ -293,6 +278,7 @@ handle_command({write, ReqID, Operation, Key, Value, Context}, _Sender, State) -
             % CCF = length(dcc:context(NewDCC)),
             % CCS = length(dcc:context(StrippedDCC)),
             % dotted_db_stats:update_key_meta(State#state.index, 1, MetaF, MetaS, CCF, CCS),
+
             ok;
         false -> ok
     end,
@@ -396,9 +382,7 @@ handle_command({sync_request, ReqID, RemoteID, RemoteEntry={Base,_Dots}}, _Sende
     % strip any unnecessary causal information to save network bandwidth
     StrippedObjects = [{Key, dcc:strip(DCC, State#state.clock)} || {Key,DCC} <- RelevantMissingObjects],
 
-% debug
-    % lager:info("Total Missing: ~p // Relevant: ~p", [length(MissingKeys), length(RelevantMissingKeys)]),
-
+    % debug
     case orddict:find(RemoteID, State#state.replicated) of
         error   ->
             lager:info("IxNd: ~p new entry in replicated VV for ~p", [{State#state.id, node()}, RemoteID]);
@@ -434,10 +418,6 @@ handle_command({sync_request, ReqID, RemoteID, RemoteEntry={Base,_Dots}}, _Sende
     case State#state.stats of
         true ->
 
-            {_B1,K1} = KeyLog,
-            dotted_db_stats:notify({histogram, bvv_size}, size(term_to_binary(State#state.clock))),
-            dotted_db_stats:notify({histogram, kl_len}, length(K1)),
-
             DCCF = [dcc:context(DCC) || {_Key, DCC} <- LocalObjectsKLFull],
             DCCS = [dcc:context(DCC) || {_Key, DCC} <- LocalObjectsKLStrip],
             MetaF = byte_size(term_to_binary(DCCF)),
@@ -446,25 +426,40 @@ handle_command({sync_request, ReqID, RemoteID, RemoteEntry={Base,_Dots}}, _Sende
             CCS = lists:sum([length(DCC) || DCC <- DCCS]),
             dotted_db_stats:update_key_meta(State#state.index, length(LocalObjectsKLFull), MetaF, MetaS, CCF, CCS),
 
-            % ok = exometer:update([dotted_db, glc, entries, length], CCS/max(1,length(DCCS))),
-            % ok = exometer:update([dotted_db, sync, total], 1),
-            % ok = exometer:update([dotted_db, sync, relevant_keys], 100*length(RelevantMissingKeys)/max(1,length(MissingKeys))),
+            dotted_db_stats:notify({histogram, bvv_size}, size(term_to_binary(State#state.clock))),
+
+            {_B1,K1} = KeyLog,
+            dotted_db_stats:notify({histogram, kl_len}, length(K1)),
+
+            Ratio_Relevant_Keys = round(100*length(RelevantMissingKeys)/max(1,length(MissingKeys))),
+            case MissingKeys > 0 of
+                true -> dotted_db_stats:notify({histogram, sync_relevant_ratio}, Ratio_Relevant_Keys);
+                false -> ok
+            end,
+
+            SLDS = CCS/max(1,length(DCCS)),
+            case SLDS =:= 0.0 orelse length(LocalObjectsKLFull) == 0 of
+                true -> ok;
+                false -> dotted_db_stats:notify({histogram, sync_local_dcc_strip}, SLDS)
+            end,
+
+            Ctx_Sent_Strip = [dcc:context(DCC) || {_Key, DCC} <- StrippedObjects],
+            Sum_Ctx_Sent_Strip = lists:sum([length(DCC) || DCC <- Ctx_Sent_Strip]),
+            Ratio_Sent_Strip = Sum_Ctx_Sent_Strip/max(1,length(StrippedObjects)),
+            case Ratio_Sent_Strip =:= 0.0 orelse length(StrippedObjects) == 0 of
+                true -> ok;
+                false -> dotted_db_stats:notify({histogram, sync_sent_dcc_strip}, Ratio_Sent_Strip)
+            end,
+
+            Size_Meta_Sent = byte_size(term_to_binary(Ctx_Sent_Strip)),
+            dotted_db_stats:notify({histogram, sync_metadata_size}, Size_Meta_Sent),
+
+
+            Payload_Sent_Strip = [{Key, dcc:values(DCC)} || {Key, DCC} <- StrippedObjects],
+            Size_Payload_Sent = byte_size(term_to_binary(Payload_Sent_Strip)),
+            dotted_db_stats:notify({histogram, sync_payload_size}, Size_Payload_Sent),
 
             ok;
-            % % get stats to return to the Sync FSM: {replicated vv, keylog, keylog length, b2a_number, b2a_size, b2a_size_full}
-            % FilledObjects = [{Key, fill_clock(Key, DCC, State#state.clock)} || {Key,DCC} <- RelevantMissingObjects],
-            % #{
-            %     b2a_number              => length(StrippedObjects),
-            %     b2a_size                => size(term_to_binary(StrippedObjects)),
-            %     b2a_size_full           => size(term_to_binary(FilledObjects)),
-            %     keylog_length_b         => length(K1) + B1,
-            %     keylog_size_b           => size(term_to_binary(KeyLog)),
-            %     replicated_vv_size_b    => size(term_to_binary(Replicated)),
-            %     vv_b                    => Replicated,
-            %     kl_b                    => {B1, length(K1)},
-            %     bvv_b                   => State#state.clock,
-            %     rem_entry               => RemoteEntry
-            % };
         false -> ok
     end,
     % update this node sync stats
@@ -512,7 +507,16 @@ handle_command({sync_response, ReqID, RespondingNodeID, RemoteNodeClockBase, Mis
             end,
             Repaired = length(RealMissingObjects),
             Sent = length(MissingObjects),
-            dotted_db_stats:sync_complete(State#state.index, Repaired, Sent, {PayloadSize, MetaSize});
+            dotted_db_stats:sync_complete(State#state.index, Repaired, Sent, {PayloadSize, MetaSize}),
+
+            Hit_Ratio = 100*Repaired/max(1, Sent),
+            case Hit_Ratio =:= 0.0 orelse length(MissingObjects) == 0 of
+                true -> ok;
+                false -> dotted_db_stats:notify({histogram, sync_hit_ratio}, Hit_Ratio)
+            end,
+            
+
+            ok;
         false -> ok
     end,
     % update this node sync stats
