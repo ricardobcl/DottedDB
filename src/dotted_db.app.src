@@ -7,36 +7,10 @@
   {applications, [
                   kernel,
                   stdlib,
-                  riak_core,
-                  exometer
+                  riak_core
                  ]},
   {mod, { dotted_db_app, []}},
   {env, [
-      {storage_backend, "leveldb"}
-      
-      % %% Exometer defaults
-      % {exometer_defaults,
-      %   [
-      %     {['_'], histogram,
-      %             [
-      %               {options,
-      %                 [ {histogram_module, exometer_slot_slide},
-      %                   {keep_high, 500}
-      %                 ]
-      %               }
-      %             ]
-      %     }
-      %   ]
-      % }
-      % {exometer, [
-      %   {report, [
-      %     {reporters, [
-      %       {exometer_report_statsd, [
-      %             {hostname, 'localhost'},
-      %             {port, 8125}
-      %       ]}
-      %     ]}
-      %   ]}
-      % ]}
+      {storage_backend, "ets"}
     ]}
  ]}.
