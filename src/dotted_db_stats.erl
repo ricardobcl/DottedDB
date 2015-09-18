@@ -25,8 +25,7 @@
 
 -include_lib("dotted_db.hrl").
 
--define(FLUSH_INTERVAL_MS, 5000). % 5000 milliseconds
--define(FLUSH_INTERVAL, 5). % 5 seconds
+-define(FLUSH_INTERVAL, 1). % 1 seconds
 -define(WARN_INTERVAL, 1000). % Warn once a second
 -define(CURRENT_DIR, "current").
 -define(ETS, ets_dotted_db_entropy).
@@ -35,7 +34,7 @@
         stats              = [],
         start_time         = os:timestamp(),
         last_write_time    = os:timestamp(),
-        flush_interval     = ?FLUSH_INTERVAL_MS,
+        flush_interval     = ?FLUSH_INTERVAL*1000,
         timer              = undefined,
         active             = false,
         last_warn          = {0,0,0}
@@ -386,8 +385,8 @@ process_stats(Now, State) ->
     %% Determine how much time has elapsed (seconds) since our last report
     %% If zero seconds, round up to one to avoid divide-by-zeros in reporting
     %% tools.
-    Elapsed = timer:now_diff(Now, State#state.start_time) / 1000000,
-    Window  = timer:now_diff(Now, State#state.last_write_time) / 1000000,
+    Elapsed = round(timer:now_diff(Now, State#state.start_time) / 1000000),
+    Window  = round(timer:now_diff(Now, State#state.last_write_time) / 1000000),
     [begin
          OpAmount = save_histogram(Elapsed, Window, Stat),
          folsom_metrics:notify({units, Stat}, {dec, OpAmount})
