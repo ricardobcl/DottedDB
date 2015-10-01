@@ -39,14 +39,11 @@ disable() ->
 
 -spec init([]) -> {ok, state()}.
 init([]) ->
-    % Tick = app_helper:get_env(dotted_db, anti_entropy_tick, ?TICK),
-    % Tick = 4294967292,
-    Tick = ?TICK,
-    lager:info("Tick: ~p", [Tick]),
-    schedule_tick(Tick),
+    lager:info("Tick: ~p", [?TICK]),
+    schedule_tick(?TICK),
     % LocalVnodes = dotted_db_utils:vnodes_from_node(node()),
     State = #state{ mode    = on,
-                    tick    = Tick},
+                    tick    = ?TICK},
                     % nodes   = LocalVnodes},
     {ok, State}.
 

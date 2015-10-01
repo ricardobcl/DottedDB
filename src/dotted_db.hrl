@@ -2,7 +2,7 @@
 
 -define(PRINT(Var), io:format("DEBUG: ~p:~p - ~p~n~n ~p~n~n", [?MODULE, ?LINE, ??Var, Var])).
 
--define(DEFAULT_TIMEOUT, 20000).
+-define(DEFAULT_TIMEOUT, 30000).
 -define(REPLICATION_FACTOR, 3).
 % -define(R, 2).
 % -define(W, 2).
@@ -10,7 +10,10 @@
 -define(DELETE_OP, delete_op).
 -define(WRITE_OP, write_op).
 
--define(TICK, 100).
+%% Options for syncs.
+-define(TICK, 200).
+-define(ONE_WAY, one_way_sync).
+-define(TWO_WAY, two_way_sync).
 
 %% Options for read requests.
 -define(OPT_DO_RR, do_read_repair).
@@ -19,7 +22,7 @@
 %% Options for put/delete requests.
 -define(OPT_PUT_REPLICAS, put_replicas).
 -define(OPT_PUT_MIN_ACKS, put_acks).
--define(ALL_REPLICAS_WRITE_RATIO, 1.0). % x percent of put/deletes go to all replica nodes
+-define(ALL_REPLICAS_WRITE_RATIO, 0.0). % x percent of put/deletes go to all replica nodes
 
 -define(OPT_TIMEOUT, opt_timeout).
 

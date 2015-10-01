@@ -1,17 +1,24 @@
-%% @doc
+%% @doc FSM that synchronizes data in two replica nodes.
+%% There are two modes:
+%%      one_way: B -> A, sends data in B that's missing from A;
+%%      two_way: A <-> B, bi-directional sync repair.
 -module(dotted_db_sync_fsm).
 -behavior(gen_fsm).
 -include("dotted_db.hrl").
 
 %% API
--export([start/3]).
+-export([start/3, start/4]).
 
 %% Callbacks
 -export([init/1, code_change/4, handle_event/3, handle_info/3,
          handle_sync_event/4, terminate/3, finalize/2]).
 
 %% States
--export([sync_start/2, sync_request/2, sync_response/2, sync_ack/2]).
+-export([   sync_start_A/2,
+            sync_missing_B/2,
+            sync_missing_A/2,
+            sync_repair_AB/2,
+            sync_ack/2]).
 
 
 %% req_id: The request id so the caller can verify the response.
@@ -19,65 +26,116 @@
 %% sender: The pid of the sender so a reply can be made.
 -record(state, {
     req_id          :: pos_integer(),
+    mode            :: ?ONE_WAY | ?TWO_WAY,
     from            :: pid(),
-    vnode           :: vnode(),
-    peer            :: vnode(),
-    timeout         :: non_neg_integer()
+    node_a          :: vnode(),
+    node_b          :: vnode(),
+    base_clock_b    :: vv(),
+    miss_from_a     :: [{key(),dcc()}],
+    timeout         :: non_neg_integer(),
+    acks            :: non_neg_integer()
 }).
 
 %%%===================================================================
 %%% API
 %%%===================================================================
 
-start(ReqID, From, Vnode) ->
-    gen_fsm:start(?MODULE, [ReqID, From, Vnode], []).
+start(ReqID, From, NodeA) ->
+    start(ReqID, ?TWO_WAY, From, NodeA).
+start(ReqID, Mode, From, NodeA) ->
+    gen_fsm:start(?MODULE, [ReqID, Mode, From, NodeA], []).
 
 %%%===================================================================
 %%% States
 %%%===================================================================
 
 %% @doc Initialize the state data.
-init([ReqID, From, Vnode]) ->
+init([ReqID, Mode, From, NodeA]) ->
     State = #state{
         req_id      = ReqID,
+        mode        = Mode,
         from        = From,
-        vnode       = Vnode,
-        peer        = undefined,
-        timeout     = ?DEFAULT_TIMEOUT * 20 % sync is much slower than PUTs/GETs,
+        node_a      = NodeA,
+        node_b      = undefined,
+        timeout     = ?DEFAULT_TIMEOUT * 20, % sync is much slower than PUTs/GETs,
+        acks        = 0
     },
-    {ok, sync_start, State, 0}.
+    {ok, sync_start_A, State, 0}.
 
 %% @doc
-sync_start(timeout, State=#state{   req_id  = ReqID,
-                                    vnode   = Vnode}) ->
-    dotted_db_vnode:sync_start([Vnode], ReqID),
-    {next_state, sync_request, State, State#state.timeout}.
+sync_start_A(timeout, State=#state{ req_id  = ReqID,
+                                    node_a  = NodeA}) ->
+    dotted_db_vnode:sync_start([NodeA], ReqID),
+    {next_state, sync_missing_B, State, State#state.timeout}.
 
 %% @doc
-sync_request(timeout, State) ->
+sync_missing_B(timeout, State) ->
     State#state.from ! {State#state.req_id, timeout},
     {stop, normal, State};
-sync_request({ok, ReqID, RemoteNodeID, Peer, RemoteEntry}, State) ->
-    dotted_db_vnode:sync_request(Peer, ReqID, RemoteNodeID, RemoteEntry),
-    {next_state, sync_response, State#state{peer=Peer}, State#state.timeout}.
+sync_missing_B({ok, ReqID, IdA, NodeB, EntryBInClockA},
+                            State=#state{ req_id = ReqID, mode = ?ONE_WAY}) ->
+    dotted_db_vnode:sync_missing([NodeB], ReqID, IdA, EntryBInClockA),
+    {next_state, sync_repair_AB, State#state{node_b=NodeB}, State#state.timeout};
+sync_missing_B({ok, ReqID, IdA, NodeB, EntryBInClockA},
+                            State=#state{ req_id = ReqID, mode = ?TWO_WAY}) ->
+% lager:info("2WAY missing B"),
+    dotted_db_vnode:sync_missing([NodeB], ReqID, IdA, EntryBInClockA),
+    {next_state, sync_missing_A, State#state{node_b=NodeB}, State#state.timeout}.
 
 %% @doc
-sync_response(timeout, State) ->
+sync_missing_A(timeout, State) ->
     State#state.from ! {State#state.req_id, timeout},
     {stop, normal, State};
-sync_response({ok, ReqID, RemoteNodeID, RemoteNodeClockBase, MissingObjects}, State=#state{vnode = Vnode}) ->
-    dotted_db_vnode:sync_response( [Vnode], ReqID, RemoteNodeID, RemoteNodeClockBase, MissingObjects),
+sync_missing_A({ok, ReqID, IdB, BaseClockB, EntryAInClockB, MissingFromA},
+                    State=#state{   req_id  = ReqID,
+                                    mode    = ?TWO_WAY,
+                                    node_a  = NodeA,
+                                    node_b  = NodeB,
+                                    timeout = Timeout}) ->
+% lager:info("2WAY missing A"),
+    dotted_db_vnode:sync_missing([NodeA], ReqID, IdB, EntryAInClockB),
+    {next_state, sync_repair_AB,
+        State#state{node_b       = NodeB,
+                    base_clock_b = BaseClockB,
+                    miss_from_a  = MissingFromA},
+        Timeout}.
+
+%% @doc
+sync_repair_AB(timeout, State) ->
+    State#state.from ! {State#state.req_id, timeout},
+    {stop, normal, State};
+sync_repair_AB({ok, ReqID, IdB, BaseClockB, _, MissingFromA},
+        State=#state{   req_id  = ReqID,
+                        mode    = ?ONE_WAY,
+                        node_a  = NodeA}) ->
+    dotted_db_vnode:sync_repair( [NodeA], ReqID, IdB, BaseClockB, MissingFromA),
+    {next_state, sync_ack, State, State#state.timeout};
+sync_repair_AB({ok, ReqID, IdA, BaseClockA, _, MissingFromB},
+        State=#state{   req_id       = ReqID,
+                        mode         = ?TWO_WAY,
+                        node_a       = NodeA,
+                        node_b       = NodeB,
+                        base_clock_b = BaseClockB,
+                        miss_from_a  = MissingFromA}) ->
+% lager:info("2WAY repair"),
+    {IdB, _} = NodeB,
+    dotted_db_vnode:sync_repair( [NodeA], ReqID, IdB, BaseClockB, MissingFromA),
+    dotted_db_vnode:sync_repair( [NodeB], ReqID, IdA, BaseClockA, MissingFromB),
     {next_state, sync_ack, State, State#state.timeout}.
+
 
 %% @doc
 sync_ack(timeout, State) ->
     State#state.from ! {State#state.req_id, timeout},
     {stop, normal, State};
-sync_ack({ok, ReqID}, State) ->
+sync_ack({ok, ReqID},  State=#state{ req_id = ReqID, mode = ?ONE_WAY}) ->
     State#state.from ! {ReqID, ok, sync},
-    {stop, normal, State}.
-
-
+    {stop, normal, State#state{acks=1}};
+sync_ack({ok, ReqID},  State=#state{ req_id = ReqID, mode = ?TWO_WAY, acks = 0}) ->
+    {next_state, sync_ack, State#state{acks=1}, State#state.timeout};
+sync_ack({ok, ReqID},  State=#state{ req_id = ReqID, mode = ?TWO_WAY, acks = 1}) ->
+    State#state.from ! {ReqID, ok, sync},
+    {stop, normal, State#state{acks=2}}.
 
 
 handle_info(_Info, _StateName, StateData) ->
