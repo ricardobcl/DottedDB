@@ -8,6 +8,10 @@
          vstate/0,
          vstate/1,
          vstates/0,
+         actual_deletes/0,
+         issued_deletes/0,
+         written_keys/0,
+         final_written_keys/0,
          new_client/0,
          new_client/1,
          get/1,
@@ -68,6 +72,34 @@ vstates() ->
     {ok, _} = dotted_db_coverage_fsm_sup:start_coverage_fsm(Request),
     wait_for_reqid(ReqID, ?DEFAULT_TIMEOUT).
 
+
+%% @doc
+actual_deletes() ->
+    ReqID = dotted_db_utils:make_request_id(),
+    Request = [ReqID, self(), actual_deleted_keys, ?DEFAULT_TIMEOUT],
+    {ok, _} = dotted_db_coverage_fsm_sup:start_coverage_fsm(Request),
+    wait_for_reqid(ReqID, ?DEFAULT_TIMEOUT).
+
+%% @doc
+issued_deletes() ->
+    ReqID = dotted_db_utils:make_request_id(),
+    Request = [ReqID, self(), issued_deleted_keys, ?DEFAULT_TIMEOUT],
+    {ok, _} = dotted_db_coverage_fsm_sup:start_coverage_fsm(Request),
+    wait_for_reqid(ReqID, ?DEFAULT_TIMEOUT).
+
+%% @doc
+written_keys() ->
+    ReqID = dotted_db_utils:make_request_id(),
+    Request = [ReqID, self(), written_keys, ?DEFAULT_TIMEOUT],
+    {ok, _} = dotted_db_coverage_fsm_sup:start_coverage_fsm(Request),
+    wait_for_reqid(ReqID, ?DEFAULT_TIMEOUT).
+
+%% @doc
+final_written_keys() ->
+    ReqID = dotted_db_utils:make_request_id(),
+    Request = [ReqID, self(), final_written_keys, ?DEFAULT_TIMEOUT],
+    {ok, _} = dotted_db_coverage_fsm_sup:start_coverage_fsm(Request),
+    wait_for_reqid(ReqID, ?DEFAULT_TIMEOUT).
 
 %% @doc Returns a pair with this module name and the local node().
 %% It can be used by client apps to connect to a DottedDB node and execute commands.
@@ -515,7 +547,7 @@ wait_for_reqid(ReqID, Timeout) ->
         % sync
         {ReqID, ok, sync}                   -> ok;
         % coverage
-        {ReqID, ok, coverage, Results}      -> process_vnode_states(Results)
+        {ReqID, ok, coverage, Results}      -> process_coverage_commands(Results)
     after Timeout ->
         {error, timeout}
     end.
@@ -525,13 +557,53 @@ decode_get_reply({BinValues, Context}) ->
     Values = [ dotted_db_utils:decode_kv(BVal) || BVal <- BinValues ],
     {Values, Context}.
 
+process_coverage_commands(Response=[{_,_,{ok, vs, _}}|_]) ->
+    process_vnode_states(Response);
+process_coverage_commands(Response=[{_,_,{ok, adk, _}}|_]) ->
+    Len = lists:sum([ L || {_,_,{ok, adk, L}} <- Response]),
+    io:format("\========= Actual Deleted ==========   \n"),
+    io:format("Length:\t ~p\n",[Len]);
+process_coverage_commands(Response=[{_,_,{ok, idk, _, _, _}}|_]) ->
+    Len = lists:sum([ L || {_,_,{ok, idk, L, _, _}} <- Response]),
+    Keys = [ {K, Vnode} || {_,_,{ok, idk, _, K, Vnode}} <- Response, K =/= {}],
+    io:format("========= Request Deleted ==========   \n"),
+    io:format("Length:\t ~p\n",[Len]),
+    case Len > 0 of
+        true ->
+            {Key, Vnode} = hd(Keys),
+            io:format("Key:\t ~p\n",[Key]),
+            dotted_db:vstate(Vnode);
+        false ->
+            ok
+    end;
+process_coverage_commands(Response=[{_,_,{ok, fwk, _}}|_]) ->
+    Len = lists:sum([ L || {_,_,{ok, fwk, L}} <- Response]),
+    io:format("========= Keys Written w/o CC ==========   \n"),
+    io:format("Length:\t ~p\n",[Len]);
+process_coverage_commands(Response=[{_,_,{ok, wk, _, _, _}}|_]) ->
+    Len = lists:sum([ L || {_,_,{ok, wk, L, _, _}} <- Response]),
+    Keys = [ {K, Vnode} || {_,_,{ok, wk, _, K, Vnode}} <- Response, K =/= {}],
+    io:format("========= Keys Written w/ CC ==========   \n"),
+    io:format("Length:\t ~p\n",[Len]),
+    case Len > 0 of
+        true ->
+            {Key, Vnode} = hd(Keys),
+            io:format("Key:\t ~p\n",[Key]),
+            dotted_db:vstate(Vnode);
+        false ->
+            ok
+    end.
+
 process_vnode_states(States) ->
-    Results  = [ process_vnode_state(State) || State <- States ],
-    Dots        = [ begin #{dots        := Res} = R , Res end || R<- Results ],
-    % ClockSize   = [ begin #{clock_size  := Res} = R , Res end || R<- Results ],
-    Keys        = [ begin #{keys        := Res} = R , Res end || R<- Results ],
-    % KLSize      = [ begin #{kl_size     := Res} = R , Res end || R<- Results ],
-    % Syncs       = [ begin #{syncs       := Res} = R , Res end || R<- Results ],
+    Results         = [ process_vnode_state(State) || State <- States ],
+    Dots            = [ begin #{dots        := Res} = R , Res end || R<- Results ],
+    % ClockSize       = [ begin #{clock_size  := Res} = R , Res end || R<- Results ],
+    Keys            = [ begin #{keys        := Res} = R , Res end || R<- Results ],
+    % KLSize          = [ begin #{kl_size     := Res} = R , Res end || R<- Results ],
+    % Syncs           = [ begin #{syncs       := Res} = R , Res end || R<- Results ],
+    SizeNSK         = [ begin #{nsk_size       := Res} = R , Res end || R<- Results ],
+    LengthNSK1      = [ begin #{nsk_len1       := Res} = R , Res end || R<- Results ],
+    LengthNSK2      = [ begin #{nsk_len2       := Res} = R , Res end || R<- Results ],
     io:format("\n\n========= Vnodes ==========   \n"),
     io:format("\t Number of vnodes                  \t ~p\n",[length(States)]),
     io:format("\t Total     average miss_dots       \t ~p\n",[average(Dots)]),
@@ -543,10 +615,14 @@ process_vnode_states(States) ->
     % io:format("\t Average   size keys in KL         \t ~p\n",[average(KLSize)]),
     % io:format("\t Per vnode size keys in KL         \t ~p\n",[lists:sort(KLSize)]),
     % io:format("\t Syncs                             \t ~p\n",[Syncs]),
+    io:format("\t Average size NSK                  \t ~p\n",[dotted_db_utils:human_filesize(average(SizeNSK))]),
+    io:format("\t # entries NSK                     \t ~p\n",[lists:sort(LengthNSK1)]),
+    io:format("\t Average # keys in NSK             \t ~p\n",[average(LengthNSK2)]),
+    io:format("\t Per vnode # keys in NSK           \t ~p\n",[lists:sort(LengthNSK2)]),
     ok.
 
-process_vnode_state({Index, _Node, {ok,{state, _Id, Index, _Node, NodeClock, _Storage,
-                    _Replicated, KeyLog, _Updates_mem, _Dets, _Stats, Syncs}}}) ->
+process_vnode_state({Index, _Node, {ok, vs, {state, _Id, Index, _Node, NodeClock, _Storage,
+                    _Replicated, KeyLog, NSK, _Updates_mem, _Dets, _Stats, Syncs}}}) ->
     % ?PRINT(NodeClock),
     MissingDots = [ miss_dots(Entry) || {_,Entry} <- NodeClock ],
     {Keys, Size} = KeyLog,
@@ -555,12 +631,17 @@ process_vnode_state({Index, _Node, {ok,{state, _Id, Index, _Node, NodeClock, _St
                 {PI, ToCounter, FromCounter, timer:now_diff(Now, LastAttempt)/1000, timer:now_diff(Now, LastExchange)/1000}
           end,
     Syncs2 = lists:map(Fun, Syncs),
+    {SizeNSK,LengthNSK1,LengthNSK2} = NSK,
     #{   
           dots          => average(MissingDots)
         , clock_size    => byte_size(term_to_binary(NodeClock))
         , keys          => Keys %length(Keys)
         , kl_size       => Size %byte_size(term_to_binary(KeyLog))
         , syncs         => Syncs2
+        , nsk_size      => SizeNSK
+        , nsk_len1      => LengthNSK1
+        , nsk_len2      => LengthNSK2
+
     }.
 
 
@@ -583,22 +664,3 @@ average([H|T], Length, Sum) ->
     average(T, Length + 1, Sum + H);
 average([], Length, Sum) ->
     Sum / max(1,Length).
-
-        % % node id used for in logical clocks
-        % id          :: id(),
-        % % index on the consistent hashing ring
-        % index       :: index(),
-        % % node logical clock
-        % clock       :: bvv(),
-        % % key->value store, where the value is a DCC (values + logical clock)
-        % storage     :: dotted_db_storage:storage(),
-        % % what peer nodes have from my coordinated writes (not real-time)
-        % replicated  :: vv(),
-        % % log for keys that this node coordinated a write (eventually older keys are safely pruned)
-        % keylog      :: keylog(),
-        % % number of updates (put or deletes) since saving node state to storage
-        % updates_mem :: integer(),
-        % % DETS table that stores in disk the vnode state
-        % dets        :: dets(),
-        % % a flag to collect or not stats
-        % stats       :: boolean()

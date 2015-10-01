@@ -156,26 +156,15 @@ terminate(_Reason, _SN, _SD) ->
 %%%===================================================================
 
 -spec read_repair(bkey(), [{index_node(), dcc()}]) -> ok.
-read_repair(BKey, Replies) ->
+read_repair(_BKey, Replies) ->
     %% Compute the final DCC.
-    FinalDCC = final_dcc_from_replies(Replies),
-    %% Computed what replica nodes have an outdated version of this key.
-    % OutadedNodes = [IN || {IN,DCC} <- Replies,
-    %                     not ( dcc:equal(FinalDCC, DCC) orelse dcc:less(FinalDCC, DCC) )],
-
-
-
-
-    %% TODO !!!!!!!!!!!!!!!!!!!!!!!
-    OutadedNodes = [],
-
-
-
-    %% Repair the outdated keys.
-    dotted_db_vnode:repair(OutadedNodes, BKey, FinalDCC),
+    _FinalDCC = final_dcc_from_replies(Replies),
+    %% Computed what replicas have an outdated version of this key, and repair them.
+    % [ dotted_db_vnode:repair([IndexNode], BKey, FinalDCC) ||
+    %     {IndexNode,DCC} <- Replies, not dcc:equal(DCC, FinalDCC)],
     ok.
 
--spec final_dcc_from_replies([index_node()]) -> dcc().
+-spec final_dcc_from_replies([{index_node(), dcc()}]) -> dcc().
 final_dcc_from_replies(Replies) ->
     DCCs = [DCC || {_,DCC} <- Replies],
     lists:foldl(fun dcc:sync/2, dcc:new(), DCCs).
