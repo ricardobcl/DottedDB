@@ -489,6 +489,7 @@ test(N) ->
 test() ->
     {not_found, _} = get("random_key"),
     K1 = dotted_db_utils:make_request_id(),
+    ?PRINT(K1),
     ok = new(K1,"v1"),
     ok = new("key2","vb"),
     ok = new(K1,"v3"),
@@ -503,7 +504,7 @@ test() ->
     ok = delete(K1,Ctx2),
     Del = get(K1),
     {not_found, _Ctx3} = Del,
-    ok = sync(),
+    % ok = sync(),
     % dotted_db_utils:pp(Stats1),
     % {ok, Client} = new_client(),
     % {ok, Stats2} = sync_at_node_debug(Client),
@@ -560,34 +561,42 @@ decode_get_reply({BinValues, Context}) ->
 process_coverage_commands(Response=[{_,_,{ok, vs, _}}|_]) ->
     process_vnode_states(Response);
 process_coverage_commands(Response=[{_,_,{ok, adk, _}}|_]) ->
-    Len = lists:sum([ L || {_,_,{ok, adk, L}} <- Response]),
+    Keys0 = lists:flatten([ K || {_,_,{ok, adk, K}} <- Response]),
+    Keys = sets:to_list(sets:from_list(Keys0)),
+    Len = length(Keys),
     io:format("\========= Actual Deleted ==========   \n"),
     io:format("Length:\t ~p\n",[Len]);
 process_coverage_commands(Response=[{_,_,{ok, idk, _, _, _}}|_]) ->
-    Len = lists:sum([ L || {_,_,{ok, idk, L, _, _}} <- Response]),
-    Keys = [ {K, Vnode} || {_,_,{ok, idk, _, K, Vnode}} <- Response, K =/= {}],
+    Keys0 = lists:flatten([ K || {_,_,{ok, idk, K, _, _}} <- Response]),
+    Keys = sets:to_list(sets:from_list(Keys0)),
+    Len = length(Keys),
+    KeyNode = [ {K, Vnode} || {_,_,{ok, idk, _, K, Vnode}} <- Response, K =/= {}],
     io:format("========= Request Deleted ==========   \n"),
     io:format("Length:\t ~p\n",[Len]),
     case Len > 0 of
         true ->
-            {Key, Vnode} = hd(Keys),
+            {Key, Vnode} = hd(KeyNode),
             io:format("Key:\t ~p\n",[Key]),
             dotted_db:vstate(Vnode);
         false ->
             ok
     end;
 process_coverage_commands(Response=[{_,_,{ok, fwk, _}}|_]) ->
-    Len = lists:sum([ L || {_,_,{ok, fwk, L}} <- Response]),
+    Keys0 = lists:flatten([ K || {_,_,{ok, fwk, K}} <- Response]),
+    Keys = sets:to_list(sets:from_list(Keys0)),
+    Len = length(Keys),
     io:format("========= Keys Written w/o CC ==========   \n"),
     io:format("Length:\t ~p\n",[Len]);
 process_coverage_commands(Response=[{_,_,{ok, wk, _, _, _}}|_]) ->
-    Len = lists:sum([ L || {_,_,{ok, wk, L, _, _}} <- Response]),
-    Keys = [ {K, Vnode} || {_,_,{ok, wk, _, K, Vnode}} <- Response, K =/= {}],
+    Keys0 = lists:flatten([ K || {_,_,{ok, wk, K, _, _}} <- Response]),
+    Keys = sets:to_list(sets:from_list(Keys0)),
+    Len = length(Keys),
+    KeyNode = [ {K, Vnode} || {_,_,{ok, wk, _, K, Vnode}} <- Response, K =/= {}],
     io:format("========= Keys Written w/ CC ==========   \n"),
     io:format("Length:\t ~p\n",[Len]),
     case Len > 0 of
         true ->
-            {Key, Vnode} = hd(Keys),
+            {Key, Vnode} = hd(KeyNode),
             io:format("Key:\t ~p\n",[Key]),
             dotted_db:vstate(Vnode);
         false ->

@@ -29,7 +29,9 @@
     mode            :: ?ONE_WAY | ?TWO_WAY,
     from            :: pid(),
     node_a          :: vnode(),
+    id_a            :: vnode_id(),
     node_b          :: vnode(),
+    id_b            :: vnode_id(),
     base_clock_b    :: vv(),
     miss_from_a     :: [{key(),dcc()}],
     timeout         :: non_neg_integer(),
@@ -72,30 +74,28 @@ sync_start_A(timeout, State=#state{ req_id  = ReqID,
 sync_missing_B(timeout, State) ->
     State#state.from ! {State#state.req_id, timeout},
     {stop, normal, State};
-sync_missing_B({ok, ReqID, IdA, NodeB, EntryBInClockA},
+sync_missing_B({ok, ReqID, IdA={_,_}, NodeB, EntryBInClockA},
                             State=#state{ req_id = ReqID, mode = ?ONE_WAY}) ->
     dotted_db_vnode:sync_missing([NodeB], ReqID, IdA, EntryBInClockA),
-    {next_state, sync_repair_AB, State#state{node_b=NodeB}, State#state.timeout};
-sync_missing_B({ok, ReqID, IdA, NodeB, EntryBInClockA},
+    {next_state, sync_repair_AB, State#state{node_b=NodeB, id_a=IdA}, State#state.timeout};
+sync_missing_B({ok, ReqID, IdA={_,_}, NodeB, EntryBInClockA},
                             State=#state{ req_id = ReqID, mode = ?TWO_WAY}) ->
 % lager:info("2WAY missing B"),
     dotted_db_vnode:sync_missing([NodeB], ReqID, IdA, EntryBInClockA),
-    {next_state, sync_missing_A, State#state{node_b=NodeB}, State#state.timeout}.
+    {next_state, sync_missing_A, State#state{node_b=NodeB, id_a=IdA}, State#state.timeout}.
 
 %% @doc
 sync_missing_A(timeout, State) ->
     State#state.from ! {State#state.req_id, timeout},
     {stop, normal, State};
-sync_missing_A({ok, ReqID, IdB, BaseClockB, EntryAInClockB, MissingFromA},
+sync_missing_A({ok, ReqID, IdB={_,_}, BaseClockB, EntryAInClockB, MissingFromA},
                     State=#state{   req_id  = ReqID,
                                     mode    = ?TWO_WAY,
                                     node_a  = NodeA,
-                                    node_b  = NodeB,
                                     timeout = Timeout}) ->
-% lager:info("2WAY missing A"),
     dotted_db_vnode:sync_missing([NodeA], ReqID, IdB, EntryAInClockB),
     {next_state, sync_repair_AB,
-        State#state{node_b       = NodeB,
+        State#state{id_b = IdB,
                     base_clock_b = BaseClockB,
                     miss_from_a  = MissingFromA},
         Timeout}.
@@ -104,21 +104,22 @@ sync_missing_A({ok, ReqID, IdB, BaseClockB, EntryAInClockB, MissingFromA},
 sync_repair_AB(timeout, State) ->
     State#state.from ! {State#state.req_id, timeout},
     {stop, normal, State};
-sync_repair_AB({ok, ReqID, IdB, BaseClockB, _, MissingFromA},
+sync_repair_AB({ok, ReqID, IdB={_,_}, BaseClockB, _, MissingFromA},
         State=#state{   req_id  = ReqID,
                         mode    = ?ONE_WAY,
                         node_a  = NodeA}) ->
     dotted_db_vnode:sync_repair( [NodeA], ReqID, IdB, BaseClockB, MissingFromA),
-    {next_state, sync_ack, State, State#state.timeout};
-sync_repair_AB({ok, ReqID, IdA, BaseClockA, _, MissingFromB},
+    {next_state, sync_ack, State#state{id_b = IdB}, State#state.timeout};
+sync_repair_AB({ok, ReqID, IdA={_,_}, BaseClockA, _, MissingFromB},
         State=#state{   req_id       = ReqID,
                         mode         = ?TWO_WAY,
                         node_a       = NodeA,
                         node_b       = NodeB,
+                        id_a         = IdA,
+                        id_b         = IdB,
                         base_clock_b = BaseClockB,
                         miss_from_a  = MissingFromA}) ->
 % lager:info("2WAY repair"),
-    {IdB, _} = NodeB,
     dotted_db_vnode:sync_repair( [NodeA], ReqID, IdB, BaseClockB, MissingFromA),
     dotted_db_vnode:sync_repair( [NodeB], ReqID, IdA, BaseClockA, MissingFromB),
     {next_state, sync_ack, State, State#state.timeout}.

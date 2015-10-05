@@ -25,7 +25,7 @@
 
 -include_lib("dotted_db.hrl").
 
--define(FLUSH_INTERVAL, 1). % 1 seconds
+-define(FLUSH_INTERVAL, 3). % 3 seconds
 -define(WARN_INTERVAL, 1000). % Warn once a second
 -define(CURRENT_DIR, "current").
 -define(ETS, ets_dotted_db_entropy).
