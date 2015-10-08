@@ -66,9 +66,9 @@ code_change(_OldVsn, State, _Extra) ->
 
 %% Internal.
 
-commands(D=[<<"GET">>, Key], S, T, C) ->
+commands(D=[<<"GET">>, Bucket, Key], S, T, C) ->
     lager:debug("GET Msg:~p",[D]),
-    Response = case C:get_at_node(Key) of
+    Response = case C:get_at_node({Bucket, Key}) of
         {not_found, _Context} ->
             [<<"OK">>, {[]}];
         {ok, {Values, _Ctx}} ->
@@ -78,9 +78,9 @@ commands(D=[<<"GET">>, Key], S, T, C) ->
     end,
     lager:debug("GET Res:~p",[Response]),
     T:send(S, msgpack:pack(Response));
-commands(D=[<<"PUT">>, Key, Value], S, T, C) ->
+commands(D=[<<"PUT">>, Bucket, Key, Value], S, T, C) ->
     lager:debug("PUT Msg:~p",[D]),
-    Response = case C:new_at_node(Key, Value) of
+    Response = case C:new_at_node({Bucket, Key}, Value) of
         ok ->
             [<<"OK">>];
         {error, _Reason} ->
@@ -88,15 +88,15 @@ commands(D=[<<"PUT">>, Key, Value], S, T, C) ->
     end,
     lager:debug("PUT Res:~p",[Response]),
     T:send(S, msgpack:pack(Response));
-commands(D=[<<"UPDATE">>, Key, Value], S, T, C) ->
+commands(D=[<<"UPDATE">>, Bucket, Key, Value], S, T, C) ->
     lager:debug("UPDATE Msg:~p",[D]),
-    Context = case C:get_at_node(Key) of
+    Context = case C:get_at_node({Bucket, Key}) of
         {ok, {_Values, Ctx}} -> 
             Ctx;
         {not_found, Ctx} -> 
             Ctx
     end,
-    Response = case C:put_at_node(Key, Value, Context) of
+    Response = case C:put_at_node({Bucket, Key}, Value, Context) of
         ok ->
             [<<"OK">>];
         {error, _Reason} ->
@@ -104,15 +104,15 @@ commands(D=[<<"UPDATE">>, Key, Value], S, T, C) ->
     end,
     lager:debug("UPDATE Res:~p",[Response]),
     T:send(S, msgpack:pack(Response));
-commands(D=[<<"DELETE">>, Key], S, T, C) ->
+commands(D=[<<"DELETE">>, Bucket, Key], S, T, C) ->
     lager:debug("DELETE Msg:~p",[D]),
-    Context = case C:get_at_node(Key) of
+    Context = case C:get_at_node({Bucket, Key}) of
         {ok, {_Values, Ctx}} -> 
             Ctx;
         {not_found, Ctx} -> 
             Ctx
     end,
-    Response = case C:delete_at_node(Key, Context) of
+    Response = case C:delete_at_node({Bucket, Key}, Context) of
         ok ->
             [<<"OK">>];
         {error, _Reason} ->

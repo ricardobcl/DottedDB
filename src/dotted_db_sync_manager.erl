@@ -101,7 +101,7 @@ schedule_tick(Tick) ->
 
 -spec tick(state()) -> {any(), state()}.
 tick(State) ->
-    lager:debug("Start new tick for AAE Sync"),
+    % lager:debug("Start new tick for AAE Sync"),
     ReqID = dotted_db_utils:make_request_id(),
     ThisNode = node(),
     case dotted_db_utils:vnodes_from_node(ThisNode) of
