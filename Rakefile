@@ -74,6 +74,7 @@ end
 
 desc "join dotted_db nodes (only needed once)"
 task :join do
+  sleep(2)
   (2..NUM_NODES).each do |n|
       sh %{dev/dev#{n}/bin/dotted_db-admin cluster join dotted_db1@127.0.0.1} rescue "already joined"
   end
