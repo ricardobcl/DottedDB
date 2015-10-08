@@ -12,6 +12,7 @@
 %% ===================================================================
 
 start(_StartType, _StartArgs) ->
+
     case dotted_db_sup:start_link() of
         {ok, Pid} ->
 
@@ -20,6 +21,14 @@ start(_StartType, _StartArgs) ->
             ok = riak_core_ring_events:add_guarded_handler(dotted_db_ring_event_handler, []),
             ok = riak_core_node_watcher_events:add_guarded_handler(dotted_db_node_event_handler, []),
             ok = riak_core_node_watcher:service_up(dotted_db, self()),
+
+
+            Port = case app_helper:get_env(dotted_db, protocol_port) of
+                N when is_integer(N)    -> N;
+                _                       -> 0
+            end,
+            {ok, _} = ranch:start_listener(the_socket, 10,
+                            ranch_tcp, [{port, Port}], dotted_db_socket, []),
 
             dotted_db_stats:add_stats([
                 % size (bytes) of the node clock

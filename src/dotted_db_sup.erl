@@ -45,6 +45,11 @@ init(_Args) ->
                       {dotted_db_sync_manager, start_link, []},
                       permanent, 30000, worker, [dotted_db_sync_manager]},
 
+    SocketServer = {dotted_db_socket_sup,
+               {dotted_db_socket_sup, start_link, []},
+               permanent, infinity, supervisor, [dotted_db_socket_sup]},
+
+
     { ok,
         { {one_for_one, 5, 10},
-          [VMaster, WriteFSMs, GetFSMs, CoverageFSMs, StatsServer, SyncManager]}}.
+          [VMaster, WriteFSMs, GetFSMs, CoverageFSMs, StatsServer, SyncManager, SocketServer]}}.

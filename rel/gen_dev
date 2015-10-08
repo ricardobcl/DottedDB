@@ -16,9 +16,11 @@ NUMBER=${NAME##dev}
 BASE=$((10000 + 10 * $NUMBER))
 WEBPORT=$(($BASE + 8))
 HANDOFFPORT=$(($BASE + 9))
+PROTOCOLPORT=$(($BASE + 7))
 NODENAME="dotted_db$NUMBER@127.0.0.1"
 
-echo "Generating $NAME - node='$NODENAME' http=$WEBPORT handoff=$HANDOFFPORT"
+echo "Generating $NAME - node='$NODENAME' http=$WEBPORT handoff=$HANDOFFPORT protocol=$PROTOCOLPORT"
 sed -e "s/@NODE@/$NODENAME/" \
     -e "s/@WEBPORT@/$WEBPORT/" \
-    -e "s/@HANDOFFPORT@/$HANDOFFPORT/" < $TEMPLATE > $VARFILE
+    -e "s/@HANDOFFPORT@/$HANDOFFPORT/" \
+    -e "s/@PROTOCOLPORT@/$PROTOCOLPORT/" < $TEMPLATE > $VARFILE
