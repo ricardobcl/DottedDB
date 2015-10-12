@@ -104,6 +104,7 @@ add_stats(NewStats) ->
     ?PRINT(NewStats),
     gen_server:call(?MODULE, {add_stats, NewStats}).
 
+notify(Name, 0.0) -> notify(Name, 0);
 notify(Name, Value) ->
     gen_server:cast(?MODULE, {notify, Name, Value}).
 
