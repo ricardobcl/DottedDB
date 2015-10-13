@@ -8,3 +8,4 @@ dev
 apps/dotted_db/src/*
 .idea/*
 DottedDB.iml
+benchmarks/tests/*

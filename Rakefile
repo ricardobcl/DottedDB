@@ -165,6 +165,10 @@ task :ring_status do
   sh %{dev/dev1/bin/dotted_db-admin  ring-status}
 end
 
+desc "plot local dev nodes stats"
+task :local_plot do
+  sh %{python benchmarks/plot.py}
+end
 
 # task :copy_riak do
 #   (1..NUM_NODES).each do |n|
