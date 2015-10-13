@@ -26,7 +26,6 @@ TODO
 
 ```shell
 rake all
-make deps/ranch/Makefile
 ```
 
 #### Normal release

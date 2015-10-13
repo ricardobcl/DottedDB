@@ -22,7 +22,7 @@
 %% Options for put/delete requests.
 -define(OPT_PUT_REPLICAS, put_replicas).
 -define(OPT_PUT_MIN_ACKS, put_acks).
--define(ALL_REPLICAS_WRITE_RATIO, 0.0). % x percent of put/deletes go to all replica nodes
+-define(ALL_REPLICAS_WRITE_RATIO, 0.5). % x percent of put/deletes go to all replica nodes
 
 -define(OPT_TIMEOUT, opt_timeout).
 

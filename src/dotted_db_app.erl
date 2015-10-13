@@ -33,11 +33,16 @@ start(_StartType, _StartArgs) ->
             dotted_db_stats:add_stats([
                 % size (bytes) of the node clock
                 {histogram, bvv_size},
+                % number of missing dots from the node clock
+                {histogram, bvv_missing_dots},
                 % length of the key log (how many keys)
                 {histogram, kl_len},
-                % average number of entries in the stripped objects
-                % whose keys were removed from the keylog
-                {histogram, sync_local_dcc_strip},
+                % size of the key log
+                {histogram, kl_size},
+                % number of non-stripped-keys in the node
+                {histogram, nsk_number},
+                % size of non-stripped-keys in the node
+                {histogram, nsk_size},
                 % average number of entries in the stripped objects
                 % sent to the destination node
                 {histogram, sync_sent_dcc_strip},
@@ -50,10 +55,16 @@ start(_StartType, _StartArgs) ->
                 {histogram, sync_payload_size},
                 % size of the metadata of the sent objects in a sync
                 {histogram, sync_metadata_size},
-                % number of delete requests
-                {histogram, deletes_made},
+                % number of missing objects sent
+                {histogram, sync_sent_missing},
+                % number of (non-stripped) delete requests
+                {histogram, deletes_incomplete},
                 % number of actual delete in the server
-                {histogram, deletes_completed}
+                {histogram, deletes_completed},
+                % number of (non-stripped) write requests
+                {histogram, write_incomplete},
+                % number of stripped write in the server
+                {histogram, write_completed}
             ]),
             dotted_db_stats:start(),
 

@@ -42,7 +42,7 @@
         id          :: vnode_id(),
         % index on the consistent hashing ring
         index       :: index(),
-        % the current node pid
+        % the current node
         node        :: node(),
         % node logical clock
         clock       :: bvv(),
@@ -68,7 +68,7 @@
 
 -define(MASTER, dotted_db_vnode_master).
 -define(UPDATE_LIMITE, 100). % save vnode state every 100 updates
--define(REPORT_TICK_INTERVAL, 500). % interval between report stats
+-define(REPORT_TICK_INTERVAL, 1000). % interval between report stats
 -define(BUFFER_STRIP_INTERVAL, 1000). % interval between attempts to strip local keys (includes replicated keys)
 -define(VNODE_STATE_FILE, "dotted_db_vnode_state").
 -define(VNODE_STATE_KEY, "dotted_db_vnode_state_key").
@@ -377,41 +377,38 @@ handle_command({sync_missing, ReqID, RemoteID={_,_}, LocalEntryInRemoteClock}, _
     % strip any unnecessary causal information to save network bandwidth
     StrippedObjects = [{Key, dcc:strip(DCC, State#state.clock)} || {Key,DCC} <- RelevantMissingObjects],
     % Optionally collect stats
-    case State#state.stats of
+    Syncs = case State#state.stats andalso MissingKeys > 0 of
         true ->
             Ratio_Relevant_Keys = round(100*length(RelevantMissingKeys)/max(1,length(MissingKeys))),
-            case MissingKeys > 0 of
-                true -> dotted_db_stats:notify({histogram, sync_relevant_ratio}, Ratio_Relevant_Keys);
+            dotted_db_stats:notify({histogram, sync_relevant_ratio}, Ratio_Relevant_Keys),
+            case length(StrippedObjects) > 0 of
+                true ->
+                    Ctx_Sent_Strip = [dcc:context(DCC) || {_Key, DCC} <- StrippedObjects],
+                    Sum_Ctx_Sent_Strip = lists:sum([length(DCC) || DCC <- Ctx_Sent_Strip]),
+                    Ratio_Sent_Strip = Sum_Ctx_Sent_Strip/max(1,length(StrippedObjects)),
+                    dotted_db_stats:notify({histogram, sync_sent_dcc_strip}, Ratio_Sent_Strip),
+        
+                    Size_Meta_Sent = byte_size(term_to_binary(Ctx_Sent_Strip)),
+                    dotted_db_stats:notify({histogram, sync_metadata_size}, Size_Meta_Sent),
+        
+                    Payload_Sent_Strip = [{Key, dcc:values(DCC)} || {Key, DCC} <- StrippedObjects],
+                    Size_Payload_Sent = byte_size(term_to_binary(Payload_Sent_Strip)),
+                    dotted_db_stats:notify({histogram, sync_payload_size}, Size_Payload_Sent),
+
+                    dotted_db_stats:notify({histogram, sync_sent_missing}, length(StrippedObjects));
                 false -> ok
             end,
-
-            Ctx_Sent_Strip = [dcc:context(DCC) || {_Key, DCC} <- StrippedObjects],
-            Sum_Ctx_Sent_Strip = lists:sum([length(DCC) || DCC <- Ctx_Sent_Strip]),
-            Ratio_Sent_Strip = Sum_Ctx_Sent_Strip/max(1,length(StrippedObjects)),
-            case Ratio_Sent_Strip =:= 0.0 orelse length(StrippedObjects) == 0 of
-                true -> ok;
-                false -> dotted_db_stats:notify({histogram, sync_sent_dcc_strip}, Ratio_Sent_Strip)
-            end,
-
-            Size_Meta_Sent = byte_size(term_to_binary(Ctx_Sent_Strip)),
-            dotted_db_stats:notify({histogram, sync_metadata_size}, Size_Meta_Sent),
-
-            Payload_Sent_Strip = [{Key, dcc:values(DCC)} || {Key, DCC} <- StrippedObjects],
-            Size_Payload_Sent = byte_size(term_to_binary(Payload_Sent_Strip)),
-            dotted_db_stats:notify({histogram, sync_payload_size}, Size_Payload_Sent),
-
-            ok;
-        false -> ok
+            % update this node sync stats
+            NewLastAttempt = os:timestamp(),
+            Fun = fun ({PI, ToCounter, FromCounter, LastAttempt, LastExchange}) ->
+                    case PI =:= RemoteID of
+                        true -> {PI, ToCounter, FromCounter + 1, NewLastAttempt, LastExchange};
+                        false -> {PI, ToCounter, FromCounter, LastAttempt, LastExchange}
+                    end
+                  end,
+            lists:map(Fun, State#state.syncs);
+        false -> State#state.syncs
     end,
-    % update this node sync stats
-    NewLastAttempt = os:timestamp(),
-    Fun = fun ({PI, ToCounter, FromCounter, LastAttempt, LastExchange}) ->
-            case PI =:= RemoteID of
-                true -> {PI, ToCounter, FromCounter + 1, NewLastAttempt, LastExchange};
-                false -> {PI, ToCounter, FromCounter, LastAttempt, LastExchange}
-            end
-          end,
-    Syncs = lists:map(Fun, State#state.syncs),
     % send the final objects and the base (contiguous) dots of the node clock to the asking node
     {reply, {   ok,
                 ReqID,
@@ -449,28 +446,11 @@ handle_command({sync_repair, ReqID, RemoteNodeID={_,_}, RemoteClockBase, Missing
     % Optionally collect stats
     Syncs = case State2#state.stats of
         true ->
-            Meta = [ dcc:context(DCC)   || {_Key, DCC} <- MissingObjects],
-            Payload = [ dcc:values(DCC) || {_Key, DCC} <- MissingObjects],
-            MetaSize = case length(MissingObjects) > 0 of
-                true -> byte_size(term_to_binary(Meta)) + byte_size(term_to_binary(RemoteClockBase));
-                false -> byte_size(term_to_binary(RemoteClockBase))
-            end,
-            PayloadSize = case length(MissingObjects) > 0 of
-                true ->  byte_size(term_to_binary(Payload));
-                false -> 0
-            end,
-            Size2 = dotted_db_utils:human_filesize(MetaSize),
-            length(MissingObjects) > 0 andalso
-                lager:debug("MissingObjects: ~p    E.bytes: ~s~n", [length(MissingObjects), Size2]),
             Repaired = length(RealMissingObjects),
             Sent = length(MissingObjects),
-            dotted_db_stats:sync_complete(State2#state.index, Repaired, Sent, {PayloadSize, MetaSize}),
-
             Hit_Ratio = 100*Repaired/max(1, Sent),
-            case Hit_Ratio =:= 0.0 orelse length(MissingObjects) == 0 of
-                true -> ok;
-                false -> dotted_db_stats:notify({histogram, sync_hit_ratio}, Hit_Ratio)
-            end,
+            Hit_Ratio =/= 0.0 andalso Sent =/= 0 andalso
+                dotted_db_stats:notify({histogram, sync_hit_ratio}, Hit_Ratio),
 
             % update this node sync stats
             NewLastExchange = os:timestamp(),
@@ -605,20 +585,6 @@ handle_info(strip_keys, State=#state{non_stripped_keys=NSKeys}) ->
             MetaF = EntryExampleSize * ?REPLICATION_FACTOR * NumNSKeys,
             MetaS = EntryExampleSize * CCS,
             dotted_db_stats:update_key_meta(State#state.index, NumNSKeys, MetaF, MetaS, CCF, CCS),
-
-            SLDS = CCS/max(1,NumNSKeys),
-            case SLDS =:= 0.0 orelse NumNSKeys == 0 of
-                true -> ok;
-                false -> dotted_db_stats:notify({histogram, sync_local_dcc_strip}, SLDS)
-            end,
-
-            case NumNSKeys2>0 of
-                true ->
-                    Keys2 = lists:flatten([dict:to_list(Map) || {_, Map} <- NSKeys2]),
-                    lager:debug("STRIP ID: ~p ~n \t MK:~p",[State#state.id, Keys2]);
-                false -> ok
-            end,
-
             ok;
         false -> ok
     end,
@@ -908,20 +874,7 @@ gc_keylog(State) ->
                     NSK = add_keys_to_strip_schedule_keylog(RemovedKeys, State#state.id, KBase, State#state.non_stripped_keys),
                     % Optionally collect stats
                     case State#state.stats of
-                        true ->
-                            % CCF = length(RemovedKeys) * ?REPLICATION_FACTOR,
-                            % CCS = lists:sum(NumEntries),
-                            % EntryExampleSize = byte_size(term_to_binary({State#state.id, 123345})),
-                            % MetaF = EntryExampleSize * ?REPLICATION_FACTOR * length(RemovedKeys),
-                            % MetaS = EntryExampleSize * CCS,
-                            % dotted_db_stats:update_key_meta(State#state.index, length(RemovedKeys), MetaF, MetaS, CCF, CCS),
-        
-                            % SLDS = CCS/max(1,length(RemovedKeys)),
-                            % case SLDS =:= 0.0 orelse length(RemovedKeys) == 0 of
-                            %     true -> ok;
-                            %     false -> dotted_db_stats:notify({histogram, sync_local_dcc_strip}, SLDS)
-                            % end,
-                            ok;
+                        true -> ok;
                         false -> ok
                     end,
                     State#state{keylog=KeyLog, non_stripped_keys=NSK};
@@ -981,11 +934,49 @@ report_stats(State) ->
         true ->
             {_B1,K1} = State#state.keylog,
             dotted_db_stats:notify({histogram, kl_len}, length(K1)),
+            dotted_db_stats:notify({histogram, kl_size}, size(term_to_binary(State#state.keylog))),
+
+
+            MissingDots = [ miss_dots(Entry) || {_,Entry} <- State#state.clock ],
+            dotted_db_stats:notify({histogram, bvv_missing_dots}, average(MissingDots)),
             dotted_db_stats:notify({histogram, bvv_size}, size(term_to_binary(State#state.clock))),
+
+            NumNSKeys = lists:sum([dict:size(Map) || {_, Map} <- State#state.non_stripped_keys]),
+            dotted_db_stats:notify({histogram, nsk_number}, NumNSKeys),
+            dotted_db_stats:notify({histogram, nsk_size}, size(term_to_binary(State#state.non_stripped_keys))),
+
+            ADelKeys = length(get_actual_deleted_keys(State#state.id)),
+            IDelKeys = length(get_issued_deleted_keys(State#state.id)),
+            dotted_db_stats:notify({histogram, deletes_incomplete}, IDelKeys),
+            dotted_db_stats:notify({histogram, deletes_completed}, ADelKeys),
+
+            IWKeys = length(get_written_keys(State#state.id)),
+            FWKeys = length(get_final_written_keys(State#state.id)),
+            dotted_db_stats:notify({histogram, write_incomplete}, IWKeys),
+            dotted_db_stats:notify({histogram, write_completed}, FWKeys),
             ok;
         false -> ok
     end.
 
+miss_dots({N,B}) ->
+    case values_aux(N,B,[]) of
+        [] -> 0;
+        L  -> lists:max(L) - N - length(L)
+    end.
+values_aux(_,0,L) -> L;
+values_aux(N,B,L) ->
+    M = N + 1,
+    case B rem 2 of
+        0 -> values_aux(M, B bsr 1, L);
+        1 -> values_aux(M, B bsr 1, [ M | L ])
+    end.
+
+average(X) ->
+    average(X, 0, 0).
+average([H|T], Length, Sum) ->
+    average(T, Length + 1, Sum + H);
+average([], Length, Sum) ->
+    Sum / max(1,Length).
 
 save_kv(Key={_,_}, ValueDCC, State) ->
     save_kv(Key, ValueDCC, State, true).

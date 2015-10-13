@@ -320,17 +320,23 @@ sanitize_options_put(Options) when is_list(Options) ->
     %% Default number of replica nodes contacted to the replication factor.
     <<A:32, B:32, C:32>> = crypto:rand_bytes(12),
     random:seed({A,B,C}),
-    RF = case random:uniform() > ?ALL_REPLICAS_WRITE_RATIO of
-        true  -> ?REPLICATION_FACTOR-1; %% Don't replicate to 1 replica node.
-        false -> ?REPLICATION_FACTOR %% Replicate to all.
-    end,
-    ReplicataNodes = proplists:get_value(?OPT_PUT_REPLICAS, Options1, RF),
+    ReplicataNodes = compute_real_replication_factor(?REPLICATION_FACTOR-1,?REPLICATION_FACTOR-1) + 1,
     %% Default number of acks from replica nodes to 2.
-    ReplicasResponses = proplists:get_value(?OPT_PUT_MIN_ACKS, Options1, 2),
+    ReplicasResponses = min(ReplicataNodes, proplists:get_value(?OPT_PUT_MIN_ACKS, Options1, 2)),
     Options2 = proplists:delete(?OPT_PUT_REPLICAS, Options1),
     Options3 = proplists:delete(?OPT_PUT_MIN_ACKS, Options2),
     [{?OPT_PUT_REPLICAS, ReplicataNodes}, {?OPT_PUT_MIN_ACKS,ReplicasResponses}] ++ Options3.
 
+
+compute_real_replication_factor(0, RF) -> RF;
+compute_real_replication_factor(Total, RF) ->
+    case random:uniform() > ?ALL_REPLICAS_WRITE_RATIO of
+        true  -> 
+            % Replicate to 1 less replica node.
+            compute_real_replication_factor(Total-1, RF-1); 
+        false ->
+            compute_real_replication_factor(Total-1, RF)
+    end.
 
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%

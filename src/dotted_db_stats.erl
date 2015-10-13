@@ -172,7 +172,7 @@ init([Stats]) ->
 
     %% Create the stats directory and setups the output file handles for dumping
     %% periodic CSV of histogram results.
-    init_histogram_files(Stats),
+    init_histogram_files(Stats, true),
     %% Register each new stat with folsom.
     [create_stat_folsom(Stat) || Stat <- Stats],
 
