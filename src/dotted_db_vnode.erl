@@ -512,6 +512,7 @@ handle_command({restart, ReqID}, _Sender, State) ->
             keylog              = {0,[]},
             replicated          = NewReplicated,
             non_stripped_keys   = [],
+            recover_keys        = [],
             storage             = NewStorage,
             syncs               = initialize_syncs(State#state.index),
             updates_mem         = 0}};
@@ -528,7 +529,7 @@ handle_command({inform_peers_restart, {ReqID, RestartingVnode, OldVnodeID, NewVn
     % remove the new node id to the replicated
     NewReplicated = vv:add(NewReplicated0, {NewVnodeID, 0}),
     % add the new node id to the node clock
-    AllKeys = get_written_keys(State#state.id) ++ get_final_written_keys(State#state.id),
+    AllKeys = get_all_keys(State),
     FunFilter = fun (Key) ->
                     RN = dotted_db_utils:replica_nodes(Key),
                     lists:member(RestartingVnode, RN)
@@ -569,6 +570,7 @@ handle_command({inform_peers_restart2, {ReqID, NewVnodeID}}, _Sender, State) ->
             undefined ->
                 {true, [], State#state.recover_keys};
             RelevantKeys ->
+                RK = proplists:delete(NewVnodeID, State#state.recover_keys),
                 {Now, Later} = lists:split(min(?MAX_KEYS_SENT,length(RelevantKeys)), RelevantKeys),
                 % get each key's respective DCC
                 RelevantMissingObjects = [{Key, guaranteed_get(Key, State)} || Key <- Now],
@@ -576,8 +578,8 @@ handle_command({inform_peers_restart2, {ReqID, NewVnodeID}}, _Sender, State) ->
                 StrippedObjects = [{Key, dcc:strip(DCC, State#state.clock)} || {Key,DCC} <- RelevantMissingObjects],
                 % save the rest of the keys for later (if there's any)
                 {LastBatch, RecoverKeys} = case Later of
-                    [] -> {true, State#state.recover_keys};
-                    _ -> {false, [{NewVnodeID, Later} | State#state.recover_keys]}
+                    [] -> {true, RK};
+                    _ -> {false, [{NewVnodeID, Later} | RK]}
                 end,
                 {LastBatch, StrippedObjects, RecoverKeys}
         end,
@@ -1332,3 +1334,8 @@ sync_merge_clocks(RemoteNodeID, RemoteClockBase, State) ->
     % the current knowledge it's receiving
     RemoteEntry = bvv:get(RemoteNodeID, RemoteClockBase),
     bvv:store_entry(RemoteNodeID, RemoteEntry, NodeClock0).
+
+get_all_keys(State) ->
+    get_written_keys(State#state.id) ++ 
+    get_final_written_keys(State#state.id) ++
+    get_issued_deleted_keys(State#state.id).

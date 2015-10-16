@@ -68,7 +68,7 @@ inform_peers(timeout, State=#state{ req_id      = ReqID,
     From ! {ReqID, timeout},
     {stop, timeout, State};
 inform_peers({ok, ReqID, Args={_, _, OldVnodeID, NewVnodeID, _}, CurrentPeers}, State=#state{req_id = ReqID}) ->
-    lager:debug("Restart Fsm: inform peers: old ~p new ~p.",[OldVnodeID, NewVnodeID]),
+    lager:info("Restart Fsm: inform peers: old ~p new ~p.",[OldVnodeID, NewVnodeID]),
     dotted_db_vnode:inform_peers_restart(CurrentPeers, Args),
     {next_state, recovering_keys,
         State#state{peers=CurrentPeers, old_id=OldVnodeID, new_id=NewVnodeID}}.
