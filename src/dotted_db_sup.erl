@@ -24,7 +24,6 @@ init(_Args) ->
                   {riak_core_vnode_master, start_link, [dotted_db_vnode]},
                   permanent, 5000, worker, [riak_core_vnode_master]},
 
-
     WriteFSMs = {dotted_db_put_fsm_sup,
                  {dotted_db_put_fsm_sup, start_link, []},
                  permanent, infinity, supervisor, [dotted_db_put_fsm_sup]},
@@ -32,6 +31,10 @@ init(_Args) ->
     GetFSMs = {dotted_db_get_fsm_sup,
                {dotted_db_get_fsm_sup, start_link, []},
                permanent, infinity, supervisor, [dotted_db_get_fsm_sup]},
+
+    RestartFSMs = {dotted_db_restart_fsm_sup,
+                 {dotted_db_restart_fsm_sup, start_link, []},
+                 permanent, infinity, supervisor, [dotted_db_restart_fsm_sup]},
 
     CoverageFSMs = {dotted_db_coverage_fsm_sup,
                     {dotted_db_coverage_fsm_sup, start_link, []},
@@ -49,7 +52,6 @@ init(_Args) ->
                {dotted_db_socket_sup, start_link, []},
                permanent, infinity, supervisor, [dotted_db_socket_sup]},
 
-
     { ok,
         { {one_for_one, 5, 10},
-          [VMaster, WriteFSMs, GetFSMs, CoverageFSMs, StatsServer, SyncManager, SocketServer]}}.
+          [VMaster, WriteFSMs, GetFSMs, RestartFSMs, CoverageFSMs, StatsServer, SyncManager, SocketServer]}}.

@@ -99,53 +99,6 @@ encode_kv(Term) ->
 decode_kv(Binary) ->
     binary_to_term(Binary).
 
-% pretty print stats
-pp(M) ->
-    #{
-        nodeA                := A   ,
-        nodeB                := B   ,
-        % start_time           := ST  ,
-        % ending_time          := ET  ,
-        b2a_number           := OL  ,
-        % b2a_size             := SOS ,
-        % b2a_size_full        := FOS ,
-        keylog_length_b      := KLL ,
-        % keylog_size_b        := KLS ,
-        % replicated_vv_size_b := VV  ,
-        vv_b                 := VV2,
-        kl_b                 := KL,
-        bvv_b                := BVV
-        % rem_entry            := RemoteEntry
-        % peers                := Peers
-    } = M,
-    List = orddict:to_list(VV2),
-    VV3 = lists:sort([Val || {_,Val} <- List]),
-    List2 = orddict:to_list(BVV),
-    BVV2 = lists:sort([Val || {_,Val} <- List2]),
-    io:format("\n\n========== SYNC ==========   \n"),
-    io:format("\t Node A:                       \t ~p\n",[A]),
-    io:format("\t Node B:                       \t ~p\n",[B]),
-    % io:format("\t Peers:                        \t ~p\n",[Peers]),
-    % io:format("\t Duration (micro):             \t ~p\n",[ET-ST]),
-    io:format("\t Objects Transfers:            \t ~p\n",[OL]),
-    % io:format("\t Objects Size:                 \t ~p\n",[SOS]),
-    % io:format("\t Objects Size Full:            \t ~p\n",[FOS]),
-    io:format("\t KeyLog Length:                \t ~p\n",[KLL]),
-    % io:format("\t KeyLog Size:                  \t ~p\n",[KLS]),
-    % io:format("\t Replicated VV Size:           \t ~p\n",[VV]),
-    io:format("\t KeyLog:                       \t ~p\n",[KL]),
-    io:format("\t BVV:                          \t ~p\n",[BVV2]),
-    io:format("\t VV:                           \t ~p\n\n",[VV3]).
-    % io:format("\t Rem Entry:                    \t ~p\n",[RemoteEntry]).
-
-
-% -spec get_time_sec() -> float().
-% get_time_sec() ->
-%     {Mega,Sec,Micro} = os:timestamp(),
-%     % (Mega * 1000000) + Sec + (Micro / 1000000).
-%     Mega * 1000000 * 1000000 + Sec * 1000000 + Micro.
-
-
 human_filesize(Size) -> human_filesize(Size, ["B","KB","MB","GB","TB","PB"]).
 human_filesize(S, [_|[_|_] = L]) when S >= 1024 -> human_filesize(S/1024, L);
 human_filesize(S, [M|_]) ->

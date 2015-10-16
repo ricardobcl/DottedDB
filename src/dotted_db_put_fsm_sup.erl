@@ -1,4 +1,4 @@
-%% @doc Supervise the rts_write FSM.
+%% @doc Supervise the put FSM.
 -module(dotted_db_put_fsm_sup).
 -behavior(supervisor).
 

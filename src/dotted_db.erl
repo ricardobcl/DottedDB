@@ -14,6 +14,8 @@
          final_written_keys/0,
          new_client/0,
          new_client/1,
+         restart/0,
+         restart/1,
          get/1,
          get/2,
          new/2,
@@ -22,6 +24,8 @@
          put/4,
          delete/2,
          delete/3,
+         restart_at_node/1,
+         restart_at_node/2,
          get_at_node/2,
          get_at_node/3,
          new_at_node/3,
@@ -53,12 +57,62 @@ ping() ->
     riak_core_vnode_master:sync_spawn_command(IndexNode, ping, dotted_db_vnode_master).
 
 
+%% @doc Reset a random vnode.
+restart() ->
+    ThisNode = node(),
+    case dotted_db_utils:vnodes_from_node(ThisNode) of
+        [] ->
+            lager:warning("No vnodes to restart on node ~p", [ThisNode]),
+            error;
+        Vnodes ->
+            IndexNode = {_, ThisNode} = case Vnodes of
+                [Vnode] -> Vnode;
+                _       -> dotted_db_utils:random_from_list(Vnodes)
+            end,
+            restart(IndexNode)
+    end.
+
+restart(IndexNode) ->
+    {ok, LocalNode} = new_client(),
+    restart_at_node(IndexNode, LocalNode).
+
+restart_at_node({?MODULE, ThisNode}) ->
+    case dotted_db_utils:vnodes_from_node(ThisNode) of
+        [] ->
+            lager:warning("No vnodes to restart on node ~p", [ThisNode]),
+            error;
+        Vnodes ->
+            IndexNode = {_, ThisNode} = case Vnodes of
+                [Vnode] -> Vnode;
+                _       -> dotted_db_utils:random_from_list(Vnodes)
+            end,
+            restart_at_node(IndexNode, {?MODULE, ThisNode})
+    end.
+
+restart_at_node(IndexNode, {?MODULE, TargetNode}) ->
+    ReqID = dotted_db_utils:make_request_id(),
+    Request = [ ReqID,
+                self(),
+                IndexNode,
+                []],
+    case node() of
+        % if this node is already the target node
+        TargetNode ->
+            dotted_db_restart_fsm_sup:start_restart_fsm(Request);
+        % this is not the target node
+        _ ->
+            proc_lib:spawn_link(TargetNode, dotted_db_restart_fsm, start_link, Request)
+    end,
+    wait_for_reqid(ReqID, ?DEFAULT_TIMEOUT*3).
+
+
+
 %% @doc Get the state from a random vnode.
 vstate() ->
     DocIdx = riak_core_util:chash_key({<<"get_vnode_state">>, term_to_binary(now())}),
     PrefList = riak_core_apl:get_primary_apl(DocIdx, 1, dotted_db),
     [{IndexNode, _Type}] = PrefList,
-    riak_core_vnode_master:sync_spawn_command(IndexNode, get_vnode_state, dotted_db_vnode_master).
+    vstate(IndexNode).
 
 %% @doc Get the state from a specific vnode.
 vstate(IndexNode) ->
@@ -554,7 +608,9 @@ wait_for_reqid(ReqID, Timeout) ->
         % sync
         {ReqID, ok, sync}                   -> ok;
         % coverage
-        {ReqID, ok, coverage, Results}      -> process_coverage_commands(Results)
+        {ReqID, ok, coverage, Results}      -> process_coverage_commands(Results);
+        % restart/reset
+        {ReqID, ok, restart, NewVnodeID}    -> lager:info("New ID: ~p",[NewVnodeID])
     after Timeout ->
         {error, timeout}
     end.
@@ -611,20 +667,24 @@ process_coverage_commands(Response=[{_,_,{ok, wk, _, _, _}}|_]) ->
 
 process_vnode_states(States) ->
     Results         = [ process_vnode_state(State) || State <- States ],
-    Dots            = [ begin #{dots        := Res} = R , Res end || R<- Results ],
-    % ClockSize       = [ begin #{clock_size  := Res} = R , Res end || R<- Results ],
-    Keys            = [ begin #{keys        := Res} = R , Res end || R<- Results ],
-    % KLSize          = [ begin #{kl_size     := Res} = R , Res end || R<- Results ],
-    % Syncs           = [ begin #{syncs       := Res} = R , Res end || R<- Results ],
+    Dots            = [ begin #{dots           := Res} = R , Res end || R<- Results ],
+    % ClockSize     = [ begin #{clock_size     := Res} = R , Res end || R<- Results ],
+    ClockLen        = [ begin #{clock_len      := Res} = R , Res end || R<- Results ],
+    Keys            = [ begin #{keys           := Res} = R , Res end || R<- Results ],
+    % KLSize        = [ begin #{kl_size        := Res} = R , Res end || R<- Results ],
+    % Syncs         = [ begin #{syncs          := Res} = R , Res end || R<- Results ],
     SizeNSK         = [ begin #{nsk_size       := Res} = R , Res end || R<- Results ],
     LengthNSK1      = [ begin #{nsk_len1       := Res} = R , Res end || R<- Results ],
     LengthNSK2      = [ begin #{nsk_len2       := Res} = R , Res end || R<- Results ],
+    LengthRKeys     = [ begin #{rkeys_len      := Res} = R , Res end || R<- Results ],
     io:format("\n\n========= Vnodes ==========   \n"),
     io:format("\t Number of vnodes                  \t ~p\n",[length(States)]),
     io:format("\t Total     average miss_dots       \t ~p\n",[average(Dots)]),
     io:format("\t All       average miss_dots       \t ~p\n",[lists:sort(Dots)]),
     % io:format("\t Average   clock size              \t ~p\n",[average(ClockSize)]),
     % io:format("\t All       clock size              \t ~p\n",[lists:sort(ClockSize)]),
+    io:format("\t Average # entries in clock        \t ~p\n",[average(ClockLen)]),
+    io:format("\t Per vnode # entries in clock      \t ~p\n",[lists:sort(ClockLen)]),
     io:format("\t Average   # keys in KL            \t ~p\n",[average(Keys)]),
     io:format("\t Per vnode # keys in KL            \t ~p\n",[lists:sort(Keys)]),
     % io:format("\t Average   size keys in KL         \t ~p\n",[average(KLSize)]),
@@ -634,10 +694,12 @@ process_vnode_states(States) ->
     io:format("\t # entries NSK                     \t ~p\n",[lists:sort(LengthNSK1)]),
     io:format("\t Average # keys in NSK             \t ~p\n",[average(LengthNSK2)]),
     io:format("\t Per vnode # keys in NSK           \t ~p\n",[lists:sort(LengthNSK2)]),
+    io:format("\t Average # keys in RecoverKeys     \t ~p\n",[average(LengthRKeys)]),
+    io:format("\t Per vnode # keys in RecoverKeys   \t ~p\n",[lists:sort(LengthRKeys)]),
     ok.
 
-process_vnode_state({Index, _Node, {ok, vs, {state, _Id, Index, _Node, NodeClock, _Storage,
-                    _Replicated, KeyLog, NSK, _Updates_mem, _Dets, _Stats, Syncs}}}) ->
+process_vnode_state({Index, _Node, {ok, vs, {state, _Id, Index, NodeClock, _Storage,
+                    _Replicated, KeyLog, NSK, RKeys, _Updates_mem, _Dets, _Stats, Syncs}}}) ->
     % ?PRINT(NodeClock),
     MissingDots = [ miss_dots(Entry) || {_,Entry} <- NodeClock ],
     {Keys, Size} = KeyLog,
@@ -647,15 +709,23 @@ process_vnode_state({Index, _Node, {ok, vs, {state, _Id, Index, _Node, NodeClock
           end,
     Syncs2 = lists:map(Fun, Syncs),
     {SizeNSK,LengthNSK1,LengthNSK2} = NSK,
+    LengthRKeys = case RKeys of
+        [] -> 0;
+        _  ->
+            {_NodeID, RecoverKeys} = hd(RKeys),
+            length(RecoverKeys)
+    end,
     #{   
           dots          => average(MissingDots)
         , clock_size    => byte_size(term_to_binary(NodeClock))
+        , clock_len     => orddict:size(NodeClock)
         , keys          => Keys %length(Keys)
         , kl_size       => Size %byte_size(term_to_binary(KeyLog))
         , syncs         => Syncs2
         , nsk_size      => SizeNSK
         , nsk_len1      => LengthNSK1
         , nsk_len2      => LengthNSK2
+        , rkeys_len     => LengthRKeys
 
     }.
 

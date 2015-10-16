@@ -22,6 +22,10 @@
 
 -export([
             get_vnode_id/1,
+            restart/2,
+            inform_peers_restart/2,
+            inform_peers_restart2/2,
+            recover_keys/2,
             read/3,
             repair/3,
             write/6,
@@ -42,8 +46,6 @@
         id          :: vnode_id(),
         % index on the consistent hashing ring
         index       :: index(),
-        % the current node
-        node        :: node(),
         % node logical clock
         clock       :: bvv(),
         % key->value store, where the value is a DCC (values + logical clock)
@@ -54,6 +56,8 @@
         keylog      :: keylog(),
         % a list of (vnode, map), where the map is between dots and keys not yet completely stripped
         non_stripped_keys :: [{id(), dict:dict()}],
+        % temporary list of nodes recovering from failure and a list of keys to send
+        recover_keys :: [{id(), [bkey()]}],
         % number of updates (put or deletes) since saving node state to storage
         updates_mem :: integer(),
         % DETS table that stores in disk the vnode state
@@ -70,6 +74,7 @@
 -define(UPDATE_LIMITE, 100). % save vnode state every 100 updates
 -define(REPORT_TICK_INTERVAL, 1000). % interval between report stats
 -define(BUFFER_STRIP_INTERVAL, 1000). % interval between attempts to strip local keys (includes replicated keys)
+-define(MAX_KEYS_SENT, 1000). % max sent at a time to a restarting node.
 -define(VNODE_STATE_FILE, "dotted_db_vnode_state").
 -define(VNODE_STATE_KEY, "dotted_db_vnode_state_key").
 
@@ -84,6 +89,31 @@ get_vnode_id(IndexNodes) ->
     riak_core_vnode_master:command(IndexNodes,
                                     get_vnode_id,
                                    {raw, undefined, self()},
+                                   ?MASTER).
+
+restart(IndexNodes, ReqID) ->
+    riak_core_vnode_master:command(IndexNodes,
+                                   {restart, ReqID},
+                                   {fsm, undefined, self()},
+                                   ?MASTER).
+
+inform_peers_restart(Peers, Args) ->
+    riak_core_vnode_master:command(Peers,
+                                   {inform_peers_restart, Args},
+                                   {fsm, undefined, self()},
+                                   ?MASTER).
+
+inform_peers_restart2(Peers, Args) ->
+    riak_core_vnode_master:command(Peers,
+                                   {inform_peers_restart2, Args},
+                                   {fsm, undefined, self()},
+                                   ?MASTER).
+
+
+recover_keys(Peers, Args) ->
+    riak_core_vnode_master:command(Peers,
+                                   {recover_keys, Args},
+                                   {fsm, undefined, self()},
                                    ?MASTER).
 
 read(ReplicaNodes, ReqID, Key) ->
@@ -134,11 +164,6 @@ sync_repair(Node, ReqID, RemoteNodeID, RemoteNodeClockBase, MissingObjects) ->
 %%%===================================================================
 
 init([Index]) ->
-    % generate a new vnode ID for now
-    <<A:32, B:32, C:32>> = crypto:rand_bytes(12),
-    random:seed({A,B,C}),
-    % get a random index withing the length of the list
-    NodeId = {Index, random:uniform(999999999999)},
     % try to read the vnode state in the DETS file, if it exists
     {Dets, NodeId2, NodeClock, KeyLog, Replicated, NonStrippedKeys} =
         case read_vnode_state(Index) of
@@ -147,13 +172,13 @@ init([Index]) ->
                 Clock = bvv:new(),
                 KLog  = {0,[]},
                 Repli = [],
-                {Ref, NodeId, Clock, KLog, Repli, []};
+                {Ref, new_vnode_id(Index), Clock, KLog, Repli, []};
             {Ref, error, Error} -> % some unexpected error
                 lager:error("Error reading vnode state from storage: ~p", [Error]),
                 Clock = bvv:new(),
                 KLog  = {0,[]},
                 Repli = [],
-                {Ref, NodeId, Clock, KLog, Repli, []};
+                {Ref, new_vnode_id(Index), Clock, KLog, Repli, []};
             {Ref, {Id, Clock, KLog, Repli, NSK}} -> % we have vnode state in the storage
                 lager:info("Recovered state for vnode ID: ~p.",[Id]),
                 {Ref, Id, Clock, KLog, Repli, NSK}
@@ -163,29 +188,25 @@ init([Index]) ->
         case open_storage(Index) of
             {{backend, ets}, S} ->
                 % if the storage is in memory, start with an "empty" vnode state
-                {S, NodeId, bvv:new(), {0,[]}, [], []};
+                {S, new_vnode_id(Index), bvv:new(), {0,[]}, [], []};
             {_, S} ->
                 {S, NodeId2,NodeClock, KeyLog, Replicated, NonStrippedKeys}
         end,
     % create an ETS to store keys written and deleted in this node (for stats)
-    ((ets:info(get_ets_id(NodeId3)) /= undefined) orelse
-        ets:new(get_ets_id(NodeId3), [named_table, public, set, {write_concurrency, false}])),
+    create_ets_all_keys(NodeId3),
     % schedule a periodic reporting message (wait 2 seconds initially)
     schedule_report(2000),
     % schedule a periodic strip of local keys
     schedule_strip_keys(2000),
-    % get the IDs of peer nodes and initialize the replicated vv (async)
-    % initialize_replicated(Index),
-    % create the state
     {ok, #state{
         % for now, lets use the index in the consistent hash as the vnode ID
         id                  = NodeId3,
         index               = Index,
-        node                = node(),
         clock               = NodeClock2,
         replicated          = Replicated2,
         keylog              = KeyLog2,
         non_stripped_keys   = NonStrippedKeys2,
+        recover_keys        = [],
         storage             = Storage,
         dets                = Dets,
         updates_mem         = 0,
@@ -222,7 +243,7 @@ handle_command({read, ReqID, Key}, _Sender, State) ->
         true -> ok;
         false -> ok
     end,
-    IndexNode = {State#state.index, State#state.node},
+    IndexNode = {State#state.index, node()},
     {reply, {ok, ReqID, IndexNode, Response}, State};
 
 
@@ -419,10 +440,7 @@ handle_command({sync_missing, ReqID, RemoteID={_,_}, LocalEntryInRemoteClock}, _
         State#state{syncs = Syncs}};
 
 handle_command({sync_repair, ReqID, RemoteNodeID={_,_}, RemoteClockBase, MissingObjects}, _Sender, State) ->
-    % replace the current entry in the node clock for the responding clock with
-    % the current knowledge it's receiving
-    RemoteEntry = bvv:get(RemoteNodeID, RemoteClockBase),
-    NodeClock = bvv:store_entry(RemoteNodeID, RemoteEntry, State#state.clock),
+    NodeClock = sync_merge_clocks(RemoteNodeID, RemoteClockBase, State),
     % get the local objects corresponding to the received objects and fill the
     % causal history for all of them
     FilledObjects =
@@ -465,6 +483,130 @@ handle_command({sync_repair, ReqID, RemoteNodeID={_,_}, RemoteClockBase, Missing
             State2#state.syncs
     end,
     {reply, {ok, ReqID}, State2#state{syncs = Syncs}};
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%% Restarting Vnode (and recovery of keys)
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+%% On the restarting node
+handle_command({restart, ReqID}, _Sender, State) ->
+    ThisVnode = {State#state.index, node()},
+    OldVnodeID = State#state.id,
+    {MyBase,0} = bvv:get(OldVnodeID, State#state.clock),
+    NewVnodeID = new_vnode_id(State#state.index),
+    NewReplicated = vv:reset_with_same_ids(State#state.replicated),
+    CurrentPeers = dotted_db_utils:peers(State#state.index),
+    true = ets:delete(get_ets_id(OldVnodeID)),
+    create_ets_all_keys(NewVnodeID),
+    {ok, Storage1} = dotted_db_storage:drop(State#state.storage),
+    ok = dotted_db_storage:close(Storage1),
+    % open the storage backend for the key-values of this vnode
+    {_, NewStorage} = open_storage(State#state.index),
+    ok = save_vnode_state(State#state.dets, {NewVnodeID, bvv:new(), {0,[]}, NewReplicated, []}),
+    {reply, {ok, ReqID, {ReqID, ThisVnode, OldVnodeID, NewVnodeID, MyBase}, CurrentPeers},
+        State#state{
+            id                  = NewVnodeID,
+            clock               = bvv:new(),
+            keylog              = {0,[]},
+            replicated          = NewReplicated,
+            non_stripped_keys   = [],
+            storage             = NewStorage,
+            syncs               = initialize_syncs(State#state.index),
+            updates_mem         = 0}};
+
+%% On the good nodes
+handle_command({inform_peers_restart, {ReqID, RestartingVnode, OldVnodeID, NewVnodeID, RemoteBase}}, _Sender, State) ->
+    % jump the base counter of the old id in the node clock, to make sure we "win"
+    % against all keys potentially not stripped yet because of that old id
+    NodeClock0 = bvv:store_entry(OldVnodeID, {RemoteBase+100000,0}, State#state.clock),
+    % add the new node id to the node clock
+    NewClock = bvv:add(NodeClock0, {NewVnodeID, 0}),
+    % remove the old node id from the replicated
+    NewReplicated0 = vv:delete_key(State#state.replicated, OldVnodeID),
+    % remove the new node id to the replicated
+    NewReplicated = vv:add(NewReplicated0, {NewVnodeID, 0}),
+    % add the new node id to the node clock
+    AllKeys = get_written_keys(State#state.id) ++ get_final_written_keys(State#state.id),
+    FunFilter = fun (Key) ->
+                    RN = dotted_db_utils:replica_nodes(Key),
+                    lists:member(RestartingVnode, RN)
+                end,
+    RelevantKeys = lists:filter(FunFilter, AllKeys),
+    {Now, Later} = lists:split(min(?MAX_KEYS_SENT,length(RelevantKeys)), RelevantKeys),
+    lager:info("Restart transfer => Now: ~p Later: ~p",[length(Now), length(Later)]),
+    % get each key's respective DCC
+    RelevantMissingObjects = [{Key, guaranteed_get(Key, State)} || Key <- Now],
+    % strip any unnecessary causal information to save network bandwidth
+    StrippedObjects = [{Key, dcc:strip(DCC, NewClock)} || {Key,DCC} <- RelevantMissingObjects],
+    % save the rest of the keys for later (if there's any)
+    {LastBatch, RecoverKeys} = case Later of
+        [] -> {true, State#state.recover_keys};
+        _ -> {false, [{NewVnodeID, Later} | State#state.recover_keys]}
+    end,
+    {reply, { ok, stage1, ReqID, {
+                ReqID,
+                {State#state.index, node()},
+                State#state.id,
+                NewClock, %bvv:base(NewClock),
+                StrippedObjects,
+                LastBatch % is this the last batch?
+            }}, State#state{clock=NewClock, replicated=NewReplicated, recover_keys=RecoverKeys}};
+
+%% On the restarting node
+handle_command({recover_keys, {ReqID, RemoteVnode, RemoteVnodeId={_,_}, RemoteClock, Objects, _LastBatch=false}}, _Sender, State) ->
+    % save the objects and return the ones that were not totally filtered
+    NonStrippedObjects = fill_strip_save_kvs(Objects, RemoteClock, State),
+    % schedule a later strip attempt for non-stripped synced keys
+    NSK = add_keys_to_strip_schedule_objects(NonStrippedObjects, RemoteVnodeId, State#state.non_stripped_keys),
+    {reply, {ok, stage2, ReqID, RemoteVnode}, State#state{non_stripped_keys=NSK}};
+
+%% On the good nodes
+handle_command({inform_peers_restart2, {ReqID, NewVnodeID}}, _Sender, State) ->
+    {LastBatch1, Objects, RecoverKeys1} =
+        case proplists:get_value(NewVnodeID, State#state.recover_keys) of
+            undefined ->
+                {true, [], State#state.recover_keys};
+            RelevantKeys ->
+                {Now, Later} = lists:split(min(?MAX_KEYS_SENT,length(RelevantKeys)), RelevantKeys),
+                % get each key's respective DCC
+                RelevantMissingObjects = [{Key, guaranteed_get(Key, State)} || Key <- Now],
+                % strip any unnecessary causal information to save network bandwidth
+                StrippedObjects = [{Key, dcc:strip(DCC, State#state.clock)} || {Key,DCC} <- RelevantMissingObjects],
+                % save the rest of the keys for later (if there's any)
+                {LastBatch, RecoverKeys} = case Later of
+                    [] -> {true, State#state.recover_keys};
+                    _ -> {false, [{NewVnodeID, Later} | State#state.recover_keys]}
+                end,
+                {LastBatch, StrippedObjects, RecoverKeys}
+        end,
+    {reply, { ok, stage3, ReqID, {
+                ReqID,
+                {State#state.index, node()},
+                State#state.id,
+                State#state.clock, %bvv:base(State#state.clock),
+                Objects,
+                LastBatch1 % is this the last batch?
+            }}, State#state{recover_keys=RecoverKeys1}};
+
+%% On the restarting node
+handle_command({recover_keys, {ReqID, RemoteVnode, RemoteNodeID={_,_}, RemoteClock, Objects, _LastBatch=true}}, _Sender, State) ->
+    % merge the remote clock with our own clock
+    NodeClock0 = bvv:merge(State#state.clock, RemoteClock),
+    % filter ids from non-peer nodes
+    PeerIndices = [State#state.index]++[Idx || {Idx,_} <- dotted_db_utils:peers(State#state.index)],
+    NodeClock = orddict:filter(fun({Index,_}, _) -> lists:member(Index, PeerIndices) end, NodeClock0),
+    % update the replicated clock to reflect what the asking node has about the local node
+    {Base,_} = bvv:get(State#state.id, RemoteClock),
+    Replicated = vv:add(State#state.replicated, {RemoteNodeID, Base}),
+    % save the objects and return the ones that were not totally filtered
+    NonStrippedObjects = fill_strip_save_kvs(Objects, RemoteClock, State#state{clock=NodeClock}),
+    % schedule a later strip attempt for non-stripped synced keys
+    NSK = add_keys_to_strip_schedule_objects(NonStrippedObjects, RemoteNodeID, State#state.non_stripped_keys),
+    % Garbage Collect keys from the KeyLog and delete keys with no causal context
+    State2 = gc_keylog(State#state{clock=NodeClock, non_stripped_keys=NSK, replicated=Replicated}),
+    {reply, {ok, stage4, ReqID, RemoteVnode}, State2};
 
 
 %% Sample command: respond to a ping
@@ -720,16 +862,23 @@ fill_clock(Key={_,_}, LocalClock, GlobalClock) ->
     % dcc:fill(LocalClock, GlobalClock, dotted_db_utils:replica_nodes_indices(Key)).
     {D,VV} = LocalClock,
     RNIndices = dotted_db_utils:replica_nodes_indices(Key),
-    ?REPLICATION_FACTOR = length(RNIndices),
-    % only consider ids that belong to both the list of ids received and the GlobalClock
-    Ids2 = [{Index,RandomID} || {Index,RandomID} <- bvv:ids(GlobalClock), 
-                                    lists:member(Index, RNIndices)],
-    FunFold = 
-        fun(Id, Acc) -> 
-            {Base,_D} = bvv:get(Id,GlobalClock),
-            vv:add(Acc,{Id,Base})
-        end,
-    {D, lists:foldl(FunFold, VV, Ids2)}.
+    case ?REPLICATION_FACTOR == length(RNIndices) of
+        true ->
+            % only consider ids that belong to both the list of ids received and the GlobalClock
+            Ids2 = [{Index,RandomID} || {Index,RandomID} <- bvv:ids(GlobalClock), 
+                                            lists:member(Index, RNIndices)],
+            FunFold = 
+                fun(Id, Acc) -> 
+                    {Base,_D} = bvv:get(Id,GlobalClock),
+                    vv:add(Acc,{Id,Base})
+                end,
+            {D, lists:foldl(FunFold, VV, Ids2)};
+        false ->
+            lager:error("fill clock: RF:~p RNind:~p for key:~p indices:~p",
+                [?REPLICATION_FACTOR, length(RNIndices), Key, RNIndices]),
+            % dcc:fill(LocalClock, GlobalClock)
+            ?REPLICATION_FACTOR = length(RNIndices)
+    end.
 
 % @doc Returns the value (DCC) associated with the Key.
 % By default, we want to return a filled causality, unless we get a storage error.
@@ -1009,6 +1158,42 @@ save_kv(Key={_,_}, ValueDCC, State, ETS) ->
             length(CC)
     end.
 
+fill_strip_save_kvs(Objects, RemoteClock, State) ->
+    fill_strip_save_kvs(Objects, RemoteClock, State, {[],[]}, true).
+
+
+fill_strip_save_kvs([], _, State, {NSK, StrippedObjects}, _ETS) ->
+    dotted_db_storage:write_batch(State#state.storage, StrippedObjects),
+    NSK;
+fill_strip_save_kvs([{Key={_,_}, DCC} | Objects], RemoteClock, State, {NSK, StrippedObjects}, ETS) ->
+    % fill the DCC with the sending clock
+    FilledDCC = fill_clock(Key, DCC, RemoteClock),
+    % removed unnecessary causality from the DCC, based on the current node clock
+    StrippedDCC = {Values, Context} = dcc:strip(FilledDCC, State#state.clock),
+    Values2 = [{D,V} || {D,V} <- Values, V =/= ?DELETE_OP],
+    % StrippedDCC = {Values2, Context},
+    % the resulting object/DCC is one of the following options:
+    %   * it has no value and no causal history -> can be deleted
+    %   * it has no value but has causal history -> it's a delete, but still must be persisted
+    %   * has values, with causal context -> it's a normal write and we should persist
+    %   * has values, but no causal context -> it's the final form for this write
+    Acc = case {Values2, Context} of
+        {[],[]} ->
+            ETS andalso ets:insert(get_ets_id(State#state.id), {Key, 1}),
+            {NSK,                       [{delete, Key}|StrippedObjects]};
+        {[],_CC} ->
+            ETS andalso ets:insert(get_ets_id(State#state.id), {Key, 0}),
+            {[{Key, StrippedDCC}|NSK],  [{put, Key, StrippedDCC}|StrippedObjects]};
+        {_ ,[]} ->
+            ETS andalso ets:insert(get_ets_id(State#state.id), {Key, 3}),
+            {NSK,                       [{put, Key, StrippedDCC}|StrippedObjects]};
+        {_ ,_CC} ->
+            ETS andalso ets:insert(get_ets_id(State#state.id), {Key, 2}),
+            {[{Key, StrippedDCC}|NSK],  [{put, Key, StrippedDCC}|StrippedObjects]}
+    end,
+    fill_strip_save_kvs(Objects, RemoteClock, State, Acc, ETS).
+
+
 read_strip_write(NonStrippedKeys, State) ->
     read_strip_write(NonStrippedKeys, State, []).
 
@@ -1018,12 +1203,12 @@ read_strip_write([ {NodeID={_,_}, Map} |Tail], State, Acc) ->
     List = dict:to_list(Map),
     Writes = [{Dot, Key} || {Dot, Key} <- List, Dot =/= -1],
     Writes2 = [{Dot, Key} || {Dot, Key} <- Writes, 0 =/= read_strip_write_key(Key, State)],
-    Deletes01 = [{Dot, Keys} || {Dot, Keys} <- List, Dot =:= -1, is_list(Keys)],
-    Deletes02 = [{Dot, Keys} || {Dot, Keys} <- List, Dot =:= -1, not is_list(Keys)],
-    Deletes = Deletes01 ++ Deletes02,
-    Deletes2 = [{Dot, read_strip_write_keys_delete(Keys, State)} || {Dot, Keys} <- Deletes],
-    Deletes3 = [{Dot, Keys} || {Dot, Keys} <- Deletes2, Keys =/= []],
-    Map2 = dict:from_list(Writes2 ++ Deletes3),
+    DeletedKeys1 = lists:flatten([Keys || {Dot, Keys} <- List, Dot =:= -1]),
+    NewList = case read_strip_write_keys_delete(DeletedKeys1, State) of
+            []  -> Writes2;
+            Del -> [{-1,Del} | Writes2]
+        end,
+    Map2 = dict:from_list(NewList),
     read_strip_write(Tail, State, [{NodeID, Map2} | Acc]).
 
 
@@ -1116,6 +1301,34 @@ add_key_to_strip_schedule(KV={_, {NodeID={_,_},_}}, [H={NodeID2={_,_}, _}|Tail])
 
 
 is_replicated_vv_up_to_date(State) ->
-    % Peers = dotted_db_utils:peers(State#state.index),
     length(State#state.replicated) >= (?REPLICATION_FACTOR-1)*2.
-    % lists:foldl(fun(Peer, Acc) -> Acc andalso orddict:is_key(Peer) end, true, Peers).
+
+
+new_vnode_id(Index) ->
+    % generate a new vnode ID for now
+    <<A:32, B:32, C:32>> = crypto:rand_bytes(12),
+    random:seed({A,B,C}),
+    % get a random index withing the length of the list
+    {Index, random:uniform(999999999999)}.
+
+create_ets_all_keys(NewVnodeID) ->
+    ((ets:info(get_ets_id(NewVnodeID)) /= undefined) orelse
+        ets:new(get_ets_id(NewVnodeID), [named_table, public, set, {write_concurrency, false}])).
+
+sync_merge_clocks(RemoteNodeID, RemoteClockBase, State) ->
+    % get current peers node ids from replicated
+    CurrentPeersIds = vv:ids(State#state.replicated),
+    % get peers indices
+    PeerIndices = [Idx || {Idx,_} <- CurrentPeersIds],
+    % filter ids from non-peer nodes
+    FunFilter = fun(Id={Idx,_},_) ->
+                    lists:member(Idx, PeerIndices) andalso %% filter the irrelevant
+                    (not lists:member(Id, CurrentPeersIds)) %% filter the non-dead
+                end,
+    RemoteClockBase2 = orddict:filter(FunFilter, RemoteClockBase),
+    % merge the filtered remote clock with our own clock
+    NodeClock0 = bvv:merge(State#state.clock, RemoteClockBase2),
+    % replace the current entry in the node clock for the responding clock with
+    % the current knowledge it's receiving
+    RemoteEntry = bvv:get(RemoteNodeID, RemoteClockBase),
+    bvv:store_entry(RemoteNodeID, RemoteEntry, NodeClock0).

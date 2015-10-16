@@ -98,7 +98,11 @@ delete(Engine, Key) ->
 %% @doc do multiple operations on the backend.
 -spec write_batch(storage(), multi_ops()) -> ok | {error, term()}.
 write_batch(Engine, Ops) ->
-    rkvs:write_batch(Engine, Ops).
+    Fun = fun
+            ({put, K, V}) -> {put, dotted_db_utils:encode_kv(K), V};
+            ({delete, K}) -> {delete, dotted_db_utils:encode_kv(K)}
+        end,
+    rkvs:write_batch(Engine, lists:map(Fun, Ops)).
 
 %% @doc fold all keys with a function
 -spec fold_keys(storage(), fun(), any()) -> any() | {error, term()}.
