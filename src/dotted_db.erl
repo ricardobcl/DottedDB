@@ -634,13 +634,14 @@ process_coverage_commands(Response=[{_,_,{ok, idk, _, _, _}}|_]) ->
     Len = length(Keys),
     KeyNode = [ {K, Vnode} || {_,_,{ok, idk, _, K, Vnode}} <- Response, K =/= {}],
     io:format("========= Request Deleted ==========   \n"),
-    io:format("Length:\t ~p\n",[Len]),
     case Len > 0 of
         true ->
+            io:format("~s~s\n",color_good_if_zero(" Length: \t ", Len)),
             {Key, Vnode} = hd(KeyNode),
             io:format("Key:\t ~p\n",[Key]),
             dotted_db:vstate(Vnode);
         false ->
+            io:format("~s~s\n",color_good_if_zero(" Length: \t ", Len)),
             ok
     end;
 process_coverage_commands(Response=[{_,_,{ok, fwk, _}}|_]) ->
@@ -655,13 +656,14 @@ process_coverage_commands(Response=[{_,_,{ok, wk, _, _, _}}|_]) ->
     Len = length(Keys),
     KeyNode = [ {K, Vnode} || {_,_,{ok, wk, _, K, Vnode}} <- Response, K =/= {}],
     io:format("========= Keys Written w/ CC ==========   \n"),
-    io:format("Length:\t ~p\n",[Len]),
     case Len > 0 of
         true ->
+            io:format("~s~s\n",color_good_if_zero(" Length: \t ", Len)),
             {Key, Vnode} = hd(KeyNode),
             io:format("Key:\t ~p\n",[Key]),
             dotted_db:vstate(Vnode);
         false ->
+            io:format("~s~s\n",color_good_if_zero(" Length: \t ", Len)),
             ok
     end.
 
@@ -679,24 +681,35 @@ process_vnode_states(States) ->
     LengthRKeys     = [ begin #{rkeys_len      := Res} = R , Res end || R<- Results ],
     io:format("\n\n========= Vnodes ==========   \n"),
     io:format("\t Number of vnodes                  \t ~p\n",[length(States)]),
-    io:format("\t Total     average miss_dots       \t ~p\n",[average(Dots)]),
+    io:format("\t~s~s\n",color_good_if_zero(" Total     average miss_dots       \t ", average(Dots))),
     io:format("\t All       average miss_dots       \t ~p\n",[lists:sort(Dots)]),
     % io:format("\t Average   clock size              \t ~p\n",[average(ClockSize)]),
     % io:format("\t All       clock size              \t ~p\n",[lists:sort(ClockSize)]),
     io:format("\t Average # entries in clock        \t ~p\n",[average(ClockLen)]),
     io:format("\t Per vnode # entries in clock      \t ~p\n",[lists:sort(ClockLen)]),
-    io:format("\t Average   # keys in KL            \t ~p\n",[average(Keys)]),
+    io:format("\t~s~s\n",color_good_if_zero(" Average   # keys in KL            \t ", average(Keys))),
     io:format("\t Per vnode # keys in KL            \t ~p\n",[lists:sort(Keys)]),
     % io:format("\t Average   size keys in KL         \t ~p\n",[average(KLSize)]),
     % io:format("\t Per vnode size keys in KL         \t ~p\n",[lists:sort(KLSize)]),
     % io:format("\t Syncs                             \t ~p\n",[Syncs]),
     io:format("\t Average size NSK                  \t ~p\n",[dotted_db_utils:human_filesize(average(SizeNSK))]),
     io:format("\t # entries NSK                     \t ~p\n",[lists:sort(LengthNSK1)]),
-    io:format("\t Average # keys in NSK             \t ~p\n",[average(LengthNSK2)]),
+    io:format("\t~s~s\n",color_good_if_zero(" Average # keys in NSK             \t ", average(LengthNSK2))),
     io:format("\t Per vnode # keys in NSK           \t ~p\n",[lists:sort(LengthNSK2)]),
-    io:format("\t Average # keys in RecoverKeys     \t ~p\n",[average(LengthRKeys)]),
+    io:format("\t~s~s\n",color_good_if_zero(" Average # keys in RecoverKeys     \t ", average(LengthRKeys))),
     io:format("\t Per vnode # keys in RecoverKeys   \t ~p\n",[lists:sort(LengthRKeys)]),
     ok.
+
+
+color_good_if_zero(Message, Number) ->
+    case Number == 0 orelse Number == 0.0 of
+        true  -> [color:on_green(Message), color:on_green(" 0 ->  GOOD! ")];
+        false -> 
+            case is_float(Number) of
+                true  -> [color:on_red(Message), color:on_red(float_to_list(Number))];
+                false -> [color:on_red(Message), color:on_red(integer_to_list(Number))]
+            end
+    end.
 
 process_vnode_state({Index, _Node, {ok, vs, {state, _Id, Index, NodeClock, _Storage,
                     _Replicated, KeyLog, NSK, RKeys, _Updates_mem, _Dets, _Stats, Syncs}}}) ->
