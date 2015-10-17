@@ -51,10 +51,17 @@ def draw(stats, col):
         pp = PdfPages(dest_path + name + '.pdf')
         pp.savefig()
         pp.close()
-        print("Done: " + name)
+        print("Done.")
     return 0
 
+
+
+## Do the plotting
+
 dest_path = '/Users/ricardo/github/DottedDB/benchmarks/tests/local/'
+if not os.path.exists(dest_path):
+    os.makedirs(dest_path)
+
 columns = [ (0,'elapsed'),
             (1,'window'),
             (2,'n'),
