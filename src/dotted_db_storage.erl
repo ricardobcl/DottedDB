@@ -25,12 +25,14 @@
 %% @doc open a storage, and by default use levelDB as backend.
 -spec open(list()) -> {ok, storage()} | {error, any()}.
 open(Name) ->
-    open(Name, [{backend, rkvs_leveldb}]).
+    open(Name, [{backend, rkvs_ets}]).
 
 %% @doc open a storage, and pass options to the backend.
 -spec open(list(), list()) -> {ok, storage()} | {error, any()}.
 open(Name, [{backend, ets}]) ->
     rkvs:open(Name, [{backend, rkvs_ets}]);
+open(Name, [{backend, bitcask}]) ->
+    rkvs:open(Name, [{backend, rkvs_bitcask}]);
 open(Name, [{backend, leveldb}]) ->
     try_open_level_db(Name, 5, undefined).
 

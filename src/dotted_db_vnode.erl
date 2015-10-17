@@ -959,10 +959,11 @@ initialize_syncs(Index) ->
 open_storage(Index) ->
     % get the preferred backend in the configuration file, defaulting to ETS if
     % there is no preference.
-    Backend = case app_helper:get_env(dotted_db, storage_backend) of
-        "leveldb"   -> {backend, leveldb};
-        "ets"       -> {backend, ets};
-        _           -> {backend, ets}
+    Backend = case application:get_env(dotted_db, storage_backend) of
+        {ok, leveldb}   -> {backend, leveldb};
+        {ok, bitcask}   -> {backend, bitcask};
+        {ok, ets}       -> {backend, ets};
+        undefined       -> {backend, ets}
     end,
     lager:info("Using ~p for vnode ~p.",[Backend,Index]),
     % give the name to the backend for this vnode using its position in the ring.

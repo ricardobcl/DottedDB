@@ -22,13 +22,11 @@ task :errors do
   sh "cat dev/dev4/log/error.log dev/dev4/log/crash.log| wc -l" rescue "print errors error"
 end
 
-desc "resets the errors and crash logs"
+desc "resets the logs"
 task :clean_errors do
-  sh "rm -f dev/dev?/log/error.log dev/dev?/log/crash.log"
-  sh "touch dev/dev1/log/error.log dev/dev1/log/crash.log" rescue "print clean error"
-  sh "touch dev/dev2/log/error.log dev/dev2/log/crash.log" rescue "print clean error"
-  sh "touch dev/dev3/log/error.log dev/dev3/log/crash.log" rescue "print clean error"
-  sh "touch dev/dev4/log/error.log dev/dev4/log/crash.log" rescue "print clean error"
+  (1..NUM_NODES).each do |n|
+    sh %{rm -rf dev/dev#{n}/log/*}
+  end
 end
 
 desc "attach to a dottedDB console"
@@ -132,7 +130,10 @@ task :stop do
 end
 
 desc "restart all dotted_db nodes"
-task :restart => [:stop, :compile, :start]
+task :restart => [:stop, :compile, :delete_storage, :start]
+
+desc "restart all dotted_db nodes"
+task :restart_with_storage => [:stop, :compile, :start]
 
 desc "clear data from all dotted_db nodes"
   task :clear => :stop do
@@ -168,6 +169,15 @@ end
 desc "plot local dev nodes stats"
 task :local_plot do
   sh %{python benchmarks/plot.py}
+end
+
+desc "deletes the database storage to start from scratch"
+task :delete_storage do
+  (1..NUM_NODES).each do |n|
+    sh %{rm -rf dev/dev#{n}/data/vnode_state}
+    sh %{rm -rf dev/dev#{n}/data/objects}
+    # sh %{rm -rf dev/dev#{n}/log}
+  end
 end
 
 # task :copy_riak do
