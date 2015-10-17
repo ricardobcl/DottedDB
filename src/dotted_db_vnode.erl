@@ -21,7 +21,7 @@
         ]).
 
 -export([
-            get_vnode_id/1,
+            get_vnode_id/2,
             restart/2,
             inform_peers_restart/2,
             inform_peers_restart2/2,
@@ -85,9 +85,9 @@
 start_vnode(I) ->
     riak_core_vnode_master:get_vnode_pid(I, ?MODULE).
 
-get_vnode_id(IndexNodes) ->
+get_vnode_id(IndexNodes, MyNodeID) ->
     riak_core_vnode_master:command(IndexNodes,
-                                    get_vnode_id,
+                                   {get_vnode_id, MyNodeID},
                                    {raw, undefined, self()},
                                    ?MASTER).
 
@@ -618,8 +618,9 @@ handle_command(ping, _Sender, State) ->
 handle_command(get_vnode_state, _Sender, State) ->
     {reply, {pong, State}, State};
 
-handle_command(get_vnode_id, _Sender, State) ->
-    {reply, {get_vnode_id, {State#state.index, node()}, State#state.id}, State};
+handle_command({get_vnode_id, RemoteID}, _Sender, State) ->
+    RemoteCounter = vv:get(RemoteID, State#state.replicated),
+    {reply, {get_vnode_id, {State#state.index, node()}, State#state.id, RemoteCounter}, State};
 
 handle_command(Message, _Sender, State) ->
     lager:info({unhandled_command, Message}),
@@ -701,12 +702,14 @@ handle_coverage(Req, _KeySpaces, _Sender, State) ->
     {noreply, State}.
 
 
-handle_info({undefined,{get_vnode_id, IndexNode={_,_}, VnodeID={_,_}}}, State) ->
+handle_info({undefined,{get_vnode_id, IndexNode={Index,_}, VnodeID={Index,_}, MyRemoteCounter}}, State) ->
     lager:info("New vnode id for Replicated VV: ~p ", [VnodeID]),
     case lists:member(IndexNode, dotted_db_utils:peers(State#state.index)) of
         true   ->
-            Replicated = vv:add(State#state.replicated, {VnodeID,0}),
-            {ok, State#state{replicated=Replicated}};
+            F = fun({Idx,_},_) -> Idx =/= Index end,
+            Replicated0 = vv:filter(F, State#state.replicated),
+            Replicated1 = vv:add(Replicated0, {VnodeID,MyRemoteCounter}),
+            {ok, State#state{replicated=Replicated1}};
         false ->
             lager:info("WRONG NODE ID! IxNd: ~p ", [IndexNode]),
             {ok, State}
@@ -930,14 +933,14 @@ read_vnode_state(Index) ->
     end.
 
 % @doc Initializes the "replicated" version vector to 0 for peers of this vnode.
-initialize_replicated(Index) ->
+initialize_replicated(NodeId={Index,_}) ->
     lager:info("Starting init repli @ IndexNode: ~p",[{Index,node()}]),
     % get the Index and Node of this node's peers, i.e., all nodes that replicates any subset of local keys.
     IndexNodes = [ IndexNode || IndexNode <- dotted_db_utils:peers(Index)],
     % for replication factor N = 3, the numbers of peers should be 4 (2 vnodes before and 2 after).
     (?REPLICATION_FACTOR-1)*2 = length(IndexNodes),
     % ask each vnode for their current vnode ID
-    get_vnode_id(IndexNodes),
+    get_vnode_id(IndexNodes, NodeId),
     ok.
 
 % @doc Initializes the "sync" stats for peers of this vnode.
@@ -1033,7 +1036,7 @@ gc_keylog(State) ->
                     State
             end;
         false ->
-            State#state.keylog =/= {0,[]} andalso initialize_replicated(State#state.index),
+            State#state.keylog =/= {0,[]} andalso initialize_replicated(State#state.id),
             State
     end.
 
@@ -1303,7 +1306,7 @@ add_key_to_strip_schedule(KV={_, {NodeID={_,_},_}}, [H={NodeID2={_,_}, _}|Tail])
 
 
 is_replicated_vv_up_to_date(State) ->
-    length(State#state.replicated) >= (?REPLICATION_FACTOR-1)*2.
+    length(State#state.replicated) =:= (?REPLICATION_FACTOR-1)*2.
 
 
 new_vnode_id(Index) ->
