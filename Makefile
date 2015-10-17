@@ -34,6 +34,19 @@ stage: rel
 	$(foreach dep,$(wildcard deps/*), rm -rf rel/dotted_db/lib/$(shell basename $(dep))-* && ln -sf $(abspath $(dep)) rel/dotted_db/lib;)
 	$(foreach app,$(wildcard apps/*), rm -rf rel/dotted_db/lib/$(shell basename $(app))-* && ln -sf $(abspath $(app)) rel/dotted_db/lib;)
 
+##
+## Lock Targets
+##
+##  see https://github.com/seth/rebar_lock_deps_plugin
+lock: deps compile
+	./rebar lock-deps
+
+locked-all: locked-deps compile
+
+locked-deps:
+	@echo "Using rebar.config.lock file to fetch dependencies"
+	./rebar -C rebar.config.lock get-deps
+
 
 ##
 ## Developer targets
