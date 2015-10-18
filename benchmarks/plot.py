@@ -46,7 +46,7 @@ def draw(stats, col):
         plt.legend()
         plt.ylim(ymin=-2)
         # plt.ylim((-2,150))
-        plt.xlim((0,700))
+        # plt.xlim((0,700))
         # save in PDF
         pp = PdfPages(dest_path + name + '.pdf')
         pp.savefig()
