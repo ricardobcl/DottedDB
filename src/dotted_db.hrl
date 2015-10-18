@@ -40,4 +40,4 @@
 -type keylog()      :: {counter(), [key()]}.
 
 -type multi_ops()   :: [{put, key(), value()}
-                       |{delete, key(), value()}].
+                       |{delete, key()}].
