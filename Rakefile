@@ -26,6 +26,7 @@ desc "resets the logs"
 task :clean_errors do
   (1..NUM_NODES).each do |n|
     sh %{rm -rf dev/dev#{n}/log/*}
+    sh "touch dev/dev#{n}/log/error.log dev/dev#{n}/log/crash.log" rescue "print clean error"
   end
 end
 
@@ -130,7 +131,7 @@ task :stop do
 end
 
 desc "restart all dotted_db nodes"
-task :restart => [:stop, :compile, :delete_storage, :start]
+task :restart => [:stop, :compile, :delete_storage, :clean_errors, :start]
 
 desc "restart all dotted_db nodes"
 task :restart_with_storage => [:stop, :compile, :start]
