@@ -74,6 +74,9 @@ sync_start_A(timeout, State=#state{ req_id  = ReqID,
 sync_missing_B(timeout, State) ->
     State#state.from ! {State#state.req_id, timeout},
     {stop, normal, State};
+sync_missing_B({cancel, ReqID, recovering}, State=#state{req_id = ReqID}) ->
+    State#state.from ! {ReqID, cancel, sync},
+    {stop, normal, State};
 sync_missing_B({ok, ReqID, IdA={_,_}, NodeB, EntryBInClockA},
                             State=#state{ req_id = ReqID, mode = ?ONE_WAY}) ->
     dotted_db_vnode:sync_missing([NodeB], ReqID, IdA, EntryBInClockA),
@@ -87,6 +90,9 @@ sync_missing_B({ok, ReqID, IdA={_,_}, NodeB, EntryBInClockA},
 %% @doc
 sync_missing_A(timeout, State) ->
     State#state.from ! {State#state.req_id, timeout},
+    {stop, normal, State};
+sync_missing_A({cancel, ReqID, recovering}, State=#state{req_id = ReqID}) ->
+    State#state.from ! {ReqID, cancel, sync},
     {stop, normal, State};
 sync_missing_A({ok, ReqID, IdB={_,_}, BaseClockB, EntryAInClockB, MissingFromA},
                     State=#state{   req_id  = ReqID,
@@ -103,6 +109,9 @@ sync_missing_A({ok, ReqID, IdB={_,_}, BaseClockB, EntryAInClockB, MissingFromA},
 %% @doc
 sync_repair_AB(timeout, State) ->
     State#state.from ! {State#state.req_id, timeout},
+    {stop, normal, State};
+sync_repair_AB({cancel, ReqID, recovering}, State=#state{req_id = ReqID}) ->
+    State#state.from ! {ReqID, cancel, sync},
     {stop, normal, State};
 sync_repair_AB({ok, ReqID, IdB={_,_}, BaseClockB, _, MissingFromA},
         State=#state{   req_id  = ReqID,
@@ -128,6 +137,9 @@ sync_repair_AB({ok, ReqID, IdA={_,_}, BaseClockA, _, MissingFromB},
 %% @doc
 sync_ack(timeout, State) ->
     State#state.from ! {State#state.req_id, timeout},
+    {stop, normal, State};
+sync_ack({cancel, ReqID, recovering}, State=#state{req_id = ReqID}) ->
+    State#state.from ! {ReqID, cancel, sync},
     {stop, normal, State};
 sync_ack({ok, ReqID},  State=#state{ req_id = ReqID, mode = ?ONE_WAY}) ->
     State#state.from ! {ReqID, ok, sync},
@@ -156,7 +168,3 @@ finalize(timeout, State) ->
 
 terminate(_Reason, _SN, _SD) ->
     ok.
-
-%%%===================================================================
-%%% Internal Functions
-%%%===================================================================

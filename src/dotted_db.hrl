@@ -11,9 +11,10 @@
 -define(WRITE_OP, write_op).
 
 %% Options for syncs.
--define(TICK, 200).
+-define(DEFAULT_SYNC_INTERVAL, 500).
 -define(ONE_WAY, one_way_sync).
 -define(TWO_WAY, two_way_sync).
+-define(DEFAULT_NODE_KILL_RATE, 999999999). % kill a vnode every x milliseconds
 
 %% Options for read requests.
 -define(OPT_DO_RR, do_read_repair).
@@ -22,7 +23,8 @@
 %% Options for put/delete requests.
 -define(OPT_PUT_REPLICAS, put_replicas).
 -define(OPT_PUT_MIN_ACKS, put_acks).
--define(ALL_REPLICAS_WRITE_RATIO, 0.5). % x percent of put/deletes go to all replica nodes
+-define(REPLICATION_FAIL_RATIO, repl_fail_ratio).
+-define(DEFAULT_REPLICATION_FAIL_RATIO, 0). % ratio of "lost" replicated put/deletes
 
 -define(OPT_TIMEOUT, opt_timeout).
 

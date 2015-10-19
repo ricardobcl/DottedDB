@@ -374,22 +374,24 @@ sanitize_options_put(Options) when is_list(Options) ->
     %% Default number of replica nodes contacted to the replication factor.
     <<A:32, B:32, C:32>> = crypto:rand_bytes(12),
     random:seed({A,B,C}),
-    ReplicataNodes = compute_real_replication_factor(?REPLICATION_FACTOR-1,?REPLICATION_FACTOR-1) + 1,
+    FailRate = proplists:get_value(?REPLICATION_FAIL_RATIO, Options1, ?DEFAULT_REPLICATION_FAIL_RATIO),
+    ReplicateXNodes = compute_real_replication_factor(FailRate, ?REPLICATION_FACTOR-1,?REPLICATION_FACTOR-1) + 1,
+    lager:debug("FailRate: ~p and ReplicateXNodes: ~p", [FailRate, ReplicateXNodes]),
     %% Default number of acks from replica nodes to 2.
-    ReplicasResponses = min(ReplicataNodes, proplists:get_value(?OPT_PUT_MIN_ACKS, Options1, 2)),
+    ReplicasResponses = min(ReplicateXNodes, proplists:get_value(?OPT_PUT_MIN_ACKS, Options1, 2)),
     Options2 = proplists:delete(?OPT_PUT_REPLICAS, Options1),
     Options3 = proplists:delete(?OPT_PUT_MIN_ACKS, Options2),
-    [{?OPT_PUT_REPLICAS, ReplicataNodes}, {?OPT_PUT_MIN_ACKS,ReplicasResponses}] ++ Options3.
+    [{?OPT_PUT_REPLICAS, ReplicateXNodes}, {?OPT_PUT_MIN_ACKS,ReplicasResponses}] ++ Options3.
 
 
-compute_real_replication_factor(0, RF) -> RF;
-compute_real_replication_factor(Total, RF) ->
-    case random:uniform() > ?ALL_REPLICAS_WRITE_RATIO of
+compute_real_replication_factor(_, 0, RF) -> RF;
+compute_real_replication_factor(FailRate, Total, RF) ->
+    case random:uniform() < FailRate of
         true  -> 
             % Replicate to 1 less replica node.
-            compute_real_replication_factor(Total-1, RF-1); 
+            compute_real_replication_factor(FailRate, Total-1, RF-1); 
         false ->
-            compute_real_replication_factor(Total-1, RF)
+            compute_real_replication_factor(FailRate, Total-1, RF)
     end.
 
 
@@ -605,6 +607,7 @@ wait_for_reqid(ReqID, Timeout) ->
         % put/delete
         {ReqID, ok, update}                 -> ok;
         {ReqID, timeout}                    -> {error, timeout};
+        {ReqID, timeout, restart}           -> {error, timeout, restart};
         % sync
         {ReqID, ok, sync}                   -> ok;
         % coverage
@@ -712,7 +715,7 @@ color_good_if_zero(Message, Number) ->
     end.
 
 process_vnode_state({Index, _Node, {ok, vs, {state, _Id, Index, NodeClock, _Storage,
-                    _Replicated, KeyLog, NSK, RKeys, _Updates_mem, _Dets, _Stats, Syncs}}}) ->
+                    _Replicated, KeyLog, NSK, RKeys, _Updates_mem, _Dets, _Stats, Syncs, _Mode}}}) ->
     % ?PRINT(NodeClock),
     MissingDots = [ miss_dots(Entry) || {_,Entry} <- NodeClock ],
     {Keys, Size} = KeyLog,

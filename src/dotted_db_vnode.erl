@@ -65,7 +65,9 @@
         % a flag to collect or not stats
         stats       :: boolean(),
         % syncs stats
-        syncs       :: [{id(), integer(), integer(), os:timestamp(), os:timestamp()}]
+        syncs       :: [{id(), integer(), integer(), os:timestamp(), os:timestamp()}],
+        % what mode the vnode is on
+        mode        :: {normal, recovering}
     }).
 
 -type state() :: #state{}.
@@ -211,7 +213,8 @@ init([Index]) ->
         dets                = Dets,
         updates_mem         = 0,
         stats               = true,
-        syncs               = initialize_syncs(Index)
+        syncs               = initialize_syncs(Index),
+        mode                = normal
         }
     }.
 
@@ -361,7 +364,9 @@ handle_command({replicate, ReqID, Key, NewDCC}, _Sender, State) ->
 %%% SYNCHRONIZING
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-handle_command({sync_start, ReqID}, _Sender, State) ->
+handle_command({sync_start, ReqID}, _Sender, State=#state{mode=recovering}) ->
+    {reply, {cancel, ReqID, recovering}, State};
+handle_command({sync_start, ReqID}, _Sender, State=#state{mode=normal}) ->
     % choose a peer at random
     NodeB = {IndexB, _} = dotted_db_utils:random_from_list(dotted_db_utils:peers(State#state.index)),
     % get the NodeB entry from this node clock
@@ -379,7 +384,9 @@ handle_command({sync_start, ReqID}, _Sender, State) ->
     {reply, {ok, ReqID, State#state.id, NodeB, EntryB}, State#state{syncs = Syncs}};
 
 
-handle_command({sync_missing, ReqID, RemoteID={_,_}, LocalEntryInRemoteClock}, _Sender, State) ->
+handle_command({sync_missing, ReqID, _, _}, _Sender, State=#state{mode=recovering}) ->
+    {reply, {cancel, ReqID, recovering}, State};
+handle_command({sync_missing, ReqID, RemoteID={_,_}, LocalEntryInRemoteClock}, _Sender, State=#state{mode=normal}) ->
     {RemoteIndex,_} = RemoteID,
     % get the all the dots (only the counters) from the local node clock, with id equal to the local node
     LocalDots = bvv:values(bvv:get(State#state.id, State#state.clock)),
@@ -439,7 +446,9 @@ handle_command({sync_missing, ReqID, RemoteID={_,_}, LocalEntryInRemoteClock}, _
                 StrippedObjects},
         State#state{syncs = Syncs}};
 
-handle_command({sync_repair, ReqID, RemoteNodeID={_,_}, RemoteClockBase, MissingObjects}, _Sender, State) ->
+handle_command({sync_repair, ReqID, _, _, _}, _Sender, State=#state{mode=recovering}) ->
+    {reply, {cancel, ReqID, recovering}, State};
+handle_command({sync_repair, ReqID, RemoteNodeID={_,_}, RemoteClockBase, MissingObjects}, _Sender, State=#state{mode=normal}) ->
     NodeClock = sync_merge_clocks(RemoteNodeID, RemoteClockBase, State),
     % get the local objects corresponding to the received objects and fill the
     % causal history for all of them
@@ -491,7 +500,9 @@ handle_command({sync_repair, ReqID, RemoteNodeID={_,_}, RemoteClockBase, Missing
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 %% On the restarting node
-handle_command({restart, ReqID}, _Sender, State) ->
+handle_command({restart, ReqID}, _Sender, State=#state{mode=recovering}) ->
+    {reply, {cancel, ReqID, recovering}, State};
+handle_command({restart, ReqID}, _Sender, State=#state{mode=normal}) ->
     ThisVnode = {State#state.index, node()},
     OldVnodeID = State#state.id,
     {MyBase,0} = bvv:get(OldVnodeID, State#state.clock),
@@ -515,7 +526,8 @@ handle_command({restart, ReqID}, _Sender, State) ->
             recover_keys        = [],
             storage             = NewStorage,
             syncs               = initialize_syncs(State#state.index),
-            updates_mem         = 0}};
+            updates_mem         = 0,
+            mode                = recovering}};
 
 %% On the good nodes
 handle_command({inform_peers_restart, {ReqID, RestartingVnode, OldVnodeID, NewVnodeID, RemoteBase}}, _Sender, State) ->
@@ -608,7 +620,7 @@ handle_command({recover_keys, {ReqID, RemoteVnode, RemoteNodeID={_,_}, RemoteClo
     NSK = add_keys_to_strip_schedule_objects(NonStrippedObjects, RemoteNodeID, State#state.non_stripped_keys),
     % Garbage Collect keys from the KeyLog and delete keys with no causal context
     State2 = gc_keylog(State#state{clock=NodeClock, non_stripped_keys=NSK, replicated=Replicated}),
-    {reply, {ok, stage4, ReqID, RemoteVnode}, State2};
+    {reply, {ok, stage4, ReqID, RemoteVnode}, State2#state{mode=normal}};
 
 
 %% Sample command: respond to a ping

@@ -124,6 +124,11 @@ write(timeout, State=#state{req_id      = ReqID,
     {next_state, waiting_coordinator, State}.
 
 %% @doc Coordinator writes the value.
+%% @doc Wait for W-1 write acks. Timeout is 20 seconds by default (see dotted_db.hrl).
+waiting_coordinator(timeout, State=#state{ req_id = ReqID, from = From }) ->
+    lager:warning("Coordinator timeout!!"),
+    From ! {ReqID, timeout},
+    {stop, timeout, State};
 waiting_coordinator({ok, ReqID, DCC}, State=#state{ req_id      = ReqID,
                                                     coordinator = Coordinator,
                                                     from        = From,
