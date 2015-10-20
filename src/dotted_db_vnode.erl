@@ -167,6 +167,7 @@ sync_repair(Node, ReqID, RemoteNodeID, RemoteNodeClockBase, MissingObjects) ->
 %%%===================================================================
 
 init([Index]) ->
+    process_flag(priority, high),
     % try to read the vnode state in the DETS file, if it exists
     {Dets, NodeId2, NodeClock, KeyLog, Replicated, NonStrippedKeys} =
         case read_vnode_state(Index) of

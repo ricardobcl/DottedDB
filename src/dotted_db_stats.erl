@@ -151,7 +151,7 @@ init([Stats]) ->
     create_table(),
     %% Trap exits so we have a chance to flush data
     process_flag(trap_exit, true),
-    process_flag(priority, high),
+    process_flag(priority, normal),
 
     % %% Spin up folsom
     % folsom:start(),
