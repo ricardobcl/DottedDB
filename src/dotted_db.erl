@@ -5,6 +5,10 @@
 
 -export([
          ping/0,
+         set_sync_interval/1,
+         set_sync_interval/2,
+         set_kill_node_rate/1,
+         set_kill_node_rate/2,
          vstate/0,
          vstate/1,
          vstates/0,
@@ -56,6 +60,35 @@ ping() ->
     [{IndexNode, _Type}] = PrefList,
     riak_core_vnode_master:sync_spawn_command(IndexNode, ping, dotted_db_vnode_master).
 
+%% @doc Set the rate at which nodes sync with each other in milliseconds.
+set_sync_interval(SyncInterval) ->
+    {ok, LocalNode} = new_client(),
+    set_sync_interval(SyncInterval, LocalNode).
+
+set_sync_interval(SyncInterval, {?MODULE, TargetNode}) ->
+    case node() of
+        % if this node is already the target node
+        TargetNode ->
+            dotted_db_sync_manager:set_sync_interval(SyncInterval);
+        % this is not the target node
+        _ ->
+            proc_lib:spawn_link(TargetNode, dotted_db_sync_manager, set_sync_interval, [SyncInterval])
+    end.
+
+%% @doc Set the rate at which nodes fail (reset) in milliseconds.
+set_kill_node_rate(KillRate) ->
+    {ok, LocalNode} = new_client(),
+    set_kill_node_rate(KillRate, LocalNode).
+
+set_kill_node_rate(KillRate, {?MODULE, TargetNode}) ->
+    case node() of
+        % if this node is already the target node
+        TargetNode ->
+            dotted_db_sync_manager:set_kill_node_interval(KillRate);
+        % this is not the target node
+        _ ->
+            proc_lib:spawn_link(TargetNode, dotted_db_sync_manager, set_kill_node_interval, [KillRate])
+    end.
 
 %% @doc Reset a random vnode.
 restart() ->
@@ -376,7 +409,7 @@ sanitize_options_put(Options) when is_list(Options) ->
     random:seed({A,B,C}),
     FailRate = proplists:get_value(?REPLICATION_FAIL_RATIO, Options1, ?DEFAULT_REPLICATION_FAIL_RATIO),
     ReplicateXNodes = compute_real_replication_factor(FailRate, ?REPLICATION_FACTOR-1,?REPLICATION_FACTOR-1) + 1,
-    lager:debug("FailRate: ~p and ReplicateXNodes: ~p", [FailRate, ReplicateXNodes]),
+    % lager:debug("FailRate: ~p and ReplicateXNodes: ~p", [FailRate, ReplicateXNodes]),
     %% Default number of acks from replica nodes to 2.
     ReplicasResponses = min(ReplicateXNodes, proplists:get_value(?OPT_PUT_MIN_ACKS, Options1, 2)),
     Options2 = proplists:delete(?OPT_PUT_REPLICAS, Options1),
