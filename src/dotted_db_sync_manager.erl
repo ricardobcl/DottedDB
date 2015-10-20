@@ -193,6 +193,8 @@ sync(State) ->
 
 
 -spec schedule_kill(non_neg_integer()) -> reference().
+schedule_kill(0) ->
+    undefined;
 schedule_kill(Interval) ->
     %% Kill a Node every X seconds
     erlang:send_after(Interval, ?MODULE, kill_node).

@@ -11,10 +11,10 @@
 -define(WRITE_OP, write_op).
 
 %% Options for syncs.
--define(DEFAULT_SYNC_INTERVAL, 500).
+-define(DEFAULT_SYNC_INTERVAL, 100).
 -define(ONE_WAY, one_way_sync).
 -define(TWO_WAY, two_way_sync).
--define(DEFAULT_NODE_KILL_RATE, 999999999). % kill a vnode every x milliseconds
+-define(DEFAULT_NODE_KILL_RATE, 0). % kill a vnode every x milliseconds; 0 = disabled
 
 %% Options for read requests.
 -define(OPT_DO_RR, do_read_repair).

@@ -54,8 +54,9 @@
         replicated  :: vv(),
         % log for keys that this node coordinated a write (eventually older keys are safely pruned)
         keylog      :: keylog(),
-        % a list of (vnode, map), where the map is between dots and keys not yet completely stripped
-        non_stripped_keys :: [{id(), dict:dict()}],
+        % the left list is a set of deleted keys, not yet stripped;
+        % the right side is a list of (vnode, map), where the map is between dots and keys not yet completely stripped
+        non_stripped_keys :: {[key()], [{id(), dict:dict()}]},
         % temporary list of nodes recovering from failure and a list of keys to send
         recover_keys :: [{id(), [bkey()]}],
         % number of updates (put or deletes) since saving node state to storage
@@ -174,13 +175,13 @@ init([Index]) ->
                 Clock = bvv:new(),
                 KLog  = {0,[]},
                 Repli = [],
-                {Ref, new_vnode_id(Index), Clock, KLog, Repli, []};
+                {Ref, new_vnode_id(Index), Clock, KLog, Repli, {[],[]}};
             {Ref, error, Error} -> % some unexpected error
                 lager:error("Error reading vnode state from storage: ~p", [Error]),
                 Clock = bvv:new(),
                 KLog  = {0,[]},
                 Repli = [],
-                {Ref, new_vnode_id(Index), Clock, KLog, Repli, []};
+                {Ref, new_vnode_id(Index), Clock, KLog, Repli, {[],[]}};
             {Ref, {Id, Clock, KLog, Repli, NSK}} -> % we have vnode state in the storage
                 lager:info("Recovered state for vnode ID: ~p.",[Id]),
                 {Ref, Id, Clock, KLog, Repli, NSK}
@@ -190,7 +191,7 @@ init([Index]) ->
         case open_storage(Index) of
             {{backend, ets}, S} ->
                 % if the storage is in memory, start with an "empty" vnode state
-                {S, new_vnode_id(Index), bvv:new(), {0,[]}, [], []};
+                {S, new_vnode_id(Index), bvv:new(), {0,[]}, [], {[],[]}};
             {_, S} ->
                 {S, NodeId2,NodeClock, KeyLog, Replicated, NonStrippedKeys}
         end,
@@ -522,7 +523,7 @@ handle_command({restart, ReqID}, _Sender, State=#state{mode=normal}) ->
             clock               = bvv:new(),
             keylog              = {0,[]},
             replicated          = NewReplicated,
-            non_stripped_keys   = [],
+            non_stripped_keys   = {[],[]},
             recover_keys        = [],
             storage             = NewStorage,
             syncs               = initialize_syncs(State#state.index),
@@ -646,9 +647,10 @@ handle_command(Message, _Sender, State) ->
 handle_coverage(vnode_state, _KeySpaces, {_, RefId, _}, State) ->
     % lager:info("COVERAGE: IxNd: ~p   \tId: ~p",[{State#state.index, node()},State#state.id]),
     {_,K} = State#state.keylog,
+    {Del,Wrt} = State#state.non_stripped_keys,
     SizeNSK = byte_size(term_to_binary(State#state.non_stripped_keys)),
-    LengthNSK1 = length(State#state.non_stripped_keys),
-    LengthNSK2 = lists:sum([dict:size(Dict) || {_,Dict} <- State#state.non_stripped_keys]),
+    LengthNSK1 = length(Wrt),
+    LengthNSK2 = lists:sum([dict:size(Dict) || {_,Dict} <- Wrt]) + length(Del),
     KL = {length(K), byte_size(term_to_binary(State#state.keylog))},
     {reply, {RefId, {ok, vs, State#state{keylog = KL, non_stripped_keys={SizeNSK,LengthNSK1,LengthNSK2} }}}, State};
 
@@ -736,8 +738,10 @@ handle_info(strip_keys, State=#state{non_stripped_keys=NSKeys}) ->
     % Optionally collect stats
     case State#state.stats of
         true ->
-            NumNSKeys = lists:sum([dict:size(Map) || {_, Map} <- NSKeys]),
-            NumNSKeys2 = lists:sum([dict:size(Map) || {_, Map} <- NSKeys2]),
+            {D1,W1} = NSKeys,
+            {D2,W2} = NSKeys2,
+            NumNSKeys = lists:sum([dict:size(Dict) || {_,Dict} <- W1]) + length(D1),
+            NumNSKeys2 = lists:sum([dict:size(Dict) || {_,Dict} <- W2]) + length(D2),
             CCF = NumNSKeys * ?REPLICATION_FACTOR,
             CCS = NumNSKeys2 * ?REPLICATION_FACTOR, % we don't really know, but assume the worst
             EntryExampleSize = byte_size(term_to_binary({State#state.id, 123345})),
@@ -1108,7 +1112,8 @@ report_stats(State) ->
             dotted_db_stats:notify({histogram, bvv_missing_dots}, average(MissingDots)),
             dotted_db_stats:notify({histogram, bvv_size}, size(term_to_binary(State#state.clock))),
 
-            NumNSKeys = lists:sum([dict:size(Map) || {_, Map} <- State#state.non_stripped_keys]),
+            {Del,Wrt} = State#state.non_stripped_keys,
+            NumNSKeys = lists:sum([dict:size(Map) || {_, Map} <- Wrt]) + length(Del),
             dotted_db_stats:notify({histogram, nsk_number}, NumNSKeys),
             dotted_db_stats:notify({histogram, nsk_size}, size(term_to_binary(State#state.non_stripped_keys))),
 
@@ -1212,25 +1217,22 @@ fill_strip_save_kvs([{Key={_,_}, DCC} | Objects], RemoteClock, State, {NSK, Stri
     fill_strip_save_kvs(Objects, RemoteClock, State, Acc, ETS).
 
 
-read_strip_write(NonStrippedKeys, State) ->
-    read_strip_write(NonStrippedKeys, State, []).
+read_strip_write({Deletes, Writes}, State) ->
+    Writes2 = read_strip_write_for_writes(Writes, State, []),
+    Deletes2 = [Key || Key <- Deletes, 0 =/= read_strip_write_one_key(Key, State)],
+    {Deletes2, Writes2}.
 
-read_strip_write([], _State, Acc) ->
-    Acc;
-read_strip_write([ {NodeID={_,_}, Map} |Tail], State, Acc) ->
-    List = dict:to_list(Map),
-    Writes = [{Dot, Key} || {Dot, Key} <- List, Dot =/= -1],
-    Writes2 = [{Dot, Key} || {Dot, Key} <- Writes, 0 =/= read_strip_write_key(Key, State)],
-    DeletedKeys1 = lists:flatten([Keys || {Dot, Keys} <- List, Dot =:= -1]),
-    NewList = case read_strip_write_keys_delete(DeletedKeys1, State) of
-            []  -> Writes2;
-            Del -> [{-1,Del} | Writes2]
-        end,
-    Map2 = dict:from_list(NewList),
-    read_strip_write(Tail, State, [{NodeID, Map2} | Acc]).
+read_strip_write_for_writes([], _State, Acc) -> Acc;
+read_strip_write_for_writes([ {NodeID={_,_}, Map} |Tail], State, Acc) ->
+    Writes = [{Dot, Key} || {Dot, Key} <- dict:to_list(Map), 0 =/= read_strip_write_one_key(Key, State)],
+    Acc2 = case Writes of
+        [] -> Acc;
+        _  -> [{NodeID, dict:from_list(Writes)} | Acc]
+    end,
+    read_strip_write_for_writes(Tail, State, Acc2).
 
 
-read_strip_write_key(Key={_,_}, State) ->
+read_strip_write_one_key(Key={_,_}, State) ->
     case dotted_db_storage:get(State#state.storage, Key) of
         {error, not_found} ->
             0;
@@ -1238,79 +1240,45 @@ read_strip_write_key(Key={_,_}, State) ->
             % some unexpected error
             lager:error("Error reading a key from storage: ~p", [Error]),
             % assume that the key was lost, i.e. it's equal to not_found
-            0;
+            -1;
         DCC ->
             % save the new k\v and remove unnecessary causal information
             save_kv(Key, DCC, State)
     end.
 
-read_strip_write_keys_delete(Keys, State) ->
-    read_strip_write_keys_delete(Keys, State, []).
-
-
-read_strip_write_keys_delete([], _, Acc) ->
-    Acc;
-read_strip_write_keys_delete([Key={_,_}|Tail], State, Acc) ->
-    N = case dotted_db_storage:get(State#state.storage, Key) of
-        {error, not_found} ->
-            0;
-        {error, Error} ->
-            % some unexpected error
-            lager:error("Error reading a key from storage: ~p", [Error]),
-            % assume that the key was lost, i.e. it's equal to not_found
-            0;
-        DCC ->
-            % save the new k\v and remove unnecessary causal information
-            save_kv(Key, DCC, State)
-    end,
-    case N =:= 0 of
-        true ->
-            read_strip_write_keys_delete(Tail, State, Acc);
-        false ->
-            read_strip_write_keys_delete(Tail, State, [Key|Acc])
-    end.
-% read_strip_write_keys_delete(K={_,_}, State, Acc) ->
-%     read_strip_write_keys_delete([K], State, Acc).
-
-
-add_keys_to_strip_schedule_objects([], _, NSK) ->
-    NSK;
+add_keys_to_strip_schedule_objects([], _, NSK) -> NSK;
 add_keys_to_strip_schedule_objects([{_, {_,[]}}|Tail], NodeID={_,_}, NSK) ->
+    % this object has no context -> no need to revisit later
      add_keys_to_strip_schedule_objects(Tail, NodeID, NSK);
-add_keys_to_strip_schedule_objects([{Key={_,_}, {[],_}}|Tail], NodeID={_,_}, NSK) ->
-    KeyDots = [{Key, {NodeID, -1}}],
-    NSK2 = add_keys_to_strip_schedule(KeyDots, NSK),
-    add_keys_to_strip_schedule_objects(Tail, NodeID, NSK2);
+add_keys_to_strip_schedule_objects([{Key={_,_}, {[],_}}|Tail], NodeID={_,_}, {Del,Wrt}) ->
+    % it's a delete with context; save the key to strip and actually delete later
+    add_keys_to_strip_schedule_objects(Tail, NodeID, {[Key|Del], Wrt});
 add_keys_to_strip_schedule_objects([{Key={_,_}, {DotValues,_}}|Tail], NodeID={_,_}, NSK) ->
     KeyDots = [{Key, Dot} || {Dot,_} <- DotValues],
     NSK2 = add_keys_to_strip_schedule(KeyDots, NSK),
     add_keys_to_strip_schedule_objects(Tail, NodeID, NSK2).
 
 
-add_keys_to_strip_schedule_keylog([], _, _, NSK) ->
-    NSK;
-add_keys_to_strip_schedule_keylog([Key={_,_}|Tail], NodeID={_,_}, Base, NSK) ->
+add_keys_to_strip_schedule_keylog([], _, _, NSK) -> NSK;
+add_keys_to_strip_schedule_keylog([Key={_,_}|Tail], NodeID={_,_}, Base, {Del,Wrt}) ->
     KeyDot = {Key, {NodeID, Base+1}},
-    % ?PRINT(KeyDot),
-    NSK2 = add_key_to_strip_schedule(KeyDot,NSK),
-    add_keys_to_strip_schedule_keylog(Tail, NodeID, Base+1, NSK2).
+    Wrt2 = add_key_to_strip_schedule(KeyDot, Wrt),
+    add_keys_to_strip_schedule_keylog(Tail, NodeID, Base+1, {Del,Wrt2}).
 
-add_keys_to_strip_schedule([], NSK) ->
-    NSK;
-add_keys_to_strip_schedule([Head={_,_} | Tail], NSK) ->
-    % ?PRINT(Head),
-    NSK2 = add_key_to_strip_schedule(Head, NSK),
-    add_keys_to_strip_schedule(Tail, NSK2).
+add_keys_to_strip_schedule([], NSK) -> NSK;
+add_keys_to_strip_schedule([Head={_,_} | Tail], {Del,Wrt}) ->
+    Wrt2 = add_key_to_strip_schedule(Head, Wrt),
+    add_keys_to_strip_schedule(Tail, {Del,Wrt2}).
 
 
 add_key_to_strip_schedule({Key={_,_}, {NodeID={_,_},Counter}}, []) ->
     [{NodeID, dict:store(Counter, Key, dict:new())}];
-add_key_to_strip_schedule({Key={_,_}, {NodeID={_,_}, -1}}, [{NodeID2={_,_}, Dict}|Tail])
-    when NodeID =:= NodeID2  ->
-    Dict2 =  dict:append(-1, Key, Dict),
-    [{NodeID, Dict2} | Tail];
-add_key_to_strip_schedule({Key={_,_}, {NodeID={_,_},Counter}}, [{NodeID2={_,_}, Dict}|Tail])
-    when NodeID =:= NodeID2  ->
+% add_key_to_strip_schedule({Key={_,_}, {NodeID={_,_}, -1}}, [{NodeID2={_,_}, Dict}|Tail])
+%     when NodeID =:= NodeID2  ->
+%     Dict2 =  dict:append(-1, Key, Dict),
+%     [{NodeID, Dict2} | Tail];
+add_key_to_strip_schedule({Key={_,_}, {NodeID={_,_}, Counter}}, [{NodeID2={_,_}, Dict}|Tail])
+    when NodeID =:= NodeID2 andalso Counter =/= -1 ->
     Dict2 =  dict:store(Counter, Key, Dict),
     [{NodeID, Dict2} | Tail];
 add_key_to_strip_schedule(KV={_, {NodeID={_,_},_}}, [H={NodeID2={_,_}, _}|Tail])
