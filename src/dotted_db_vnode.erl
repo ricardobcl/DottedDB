@@ -863,6 +863,7 @@ delete(State) ->
             lager:info("GOOD_DROP: {~p, ~p}",[State#state.index, node()]);
         false -> ok
     end,
+    true = ets:delete(get_ets_id(State#state.id)),
     {ok, State#state{storage=Storage1}}.
 
 handle_exit(_Pid, _Reason, State) ->
@@ -1003,6 +1004,7 @@ close_all(_State=#state{id          = Id,
             lager:warning("Error on closing storage: ~p",[Reason])
     end,
     ok = save_vnode_state(Dets, {Id, NodeClock, KeyLog, Replicated, NSK}),
+    true = ets:delete(get_ets_id(Id)),
     ok = dets:close(Dets).
 
 get_issued_deleted_keys(Id) ->
