@@ -984,16 +984,19 @@ initialize_syncs(_Index) ->
 open_storage(Index) ->
     % get the preferred backend in the configuration file, defaulting to ETS if
     % there is no preference.
-    Backend = case application:get_env(dotted_db, storage_backend) of
-        {ok, leveldb}   -> {backend, leveldb};
-        {ok, bitcask}   -> {backend, bitcask};
-        {ok, ets}       -> {backend, ets};
-        undefined       -> {backend, ets}
+    {Backend, Options} = case application:get_env(dotted_db, storage_backend, ets) of
+        leveldb   -> {{backend, leveldb}, []};
+        ets       -> {{backend, ets}, []};
+        bitcask   -> {{backend, bitcask}, [{db_opts,[
+                read_write,
+                {sync_strategy, application:get_env(dotted_db, bitcask_io_sync, none)},
+                {io_mode, application:get_env(dotted_db, bitcask_io_mode, erlang)},
+                {merge_window, application:get_env(dotted_db, bitcask_merge_window, never)}]}]}
     end,
     lager:info("Using ~p for vnode ~p.",[Backend,Index]),
     % give the name to the backend for this vnode using its position in the ring.
     DBName = filename:join("data/objects/", integer_to_list(Index)),
-    {ok, Storage} = dotted_db_storage:open(DBName, [Backend]),
+    {ok, Storage} = dotted_db_storage:open(DBName, Backend, Options),
     {Backend, Storage}.
 
 % @doc Close the key-value backend, save the vnode state and close the DETS file.

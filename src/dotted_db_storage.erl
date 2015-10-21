@@ -5,6 +5,7 @@
 
 -export([   open/1,
             open/2,
+            open/3,
             close/1,
             destroy/1,
             get/2,
@@ -22,24 +23,31 @@
 -export_type([storage/0]).
 
 
-%% @doc open a storage, and by default use levelDB as backend.
+%% @doc open a storage, and by default use ETS as backend.
 -spec open(list()) -> {ok, storage()} | {error, any()}.
 open(Name) ->
-    open(Name, [{backend, ets}]).
+    open(Name, [{backend, ets}], []).
+
+-spec open(list(), {backend, atom()}) -> {ok, storage()} | {error, any()}.
+open(Name, Backend) ->
+    open(Name, Backend, []).
 
 %% @doc open a storage, and pass options to the backend.
--spec open(list(), list()) -> {ok, storage()} | {error, any()}.
-open(Name, [{backend, ets}]) ->
-    rkvs:open(Name, [{backend, rkvs_ets}]);
-open(Name, [{backend, bitcask}]) ->
-    rkvs:open(Name, [{backend, rkvs_bitcask}]);
-open(Name, [{backend, leveldb}]) ->
-    try_open_level_db(Name, 5, undefined).
+-spec open(list(), {backend, atom()}, list()) -> {ok, storage()} | {error, any()}.
+open(Name, {backend, ets}, Options) ->
+    Options2 = [{value_encoding, term}|Options],
+    rkvs:open(Name, [{backend, rkvs_ets}|Options2]);
+open(Name, {backend, bitcask}, Options) ->
+    Options2 = [{value_encoding, term}|Options],
+    rkvs:open(Name, [{backend, rkvs_bitcask}|Options2]);
+open(Name, {backend, leveldb}, Options) ->
+    Options2 = [{value_encoding, term}|Options],
+    try_open_level_db(Name, 5, undefined, Options2).
 
-try_open_level_db(_Name, 0, LastError) ->
+try_open_level_db(_Name, 0, LastError, _Options) ->
     {error, LastError};
-try_open_level_db(Name, RetriesLeft, _) ->
-    case rkvs:open(Name, [{backend, rkvs_leveldb}]) of
+try_open_level_db(Name, RetriesLeft, _, Options) ->
+    case rkvs:open(Name, [{backend, rkvs_leveldb}|Options]) of
         {ok, Engine} ->
             {ok, Engine};
         %% Check specifically for lock error, this can be caused if
@@ -53,7 +61,7 @@ try_open_level_db(Name, RetriesLeft, _) ->
                     lager:warning("Leveldb Open backend retrying ~p in ~p ms after error ~s\n",
                                 [Name, SleepFor, OpenErr]),
                     timer:sleep(SleepFor),
-                    try_open_level_db(Name, RetriesLeft - 1, Reason);
+                    try_open_level_db(Name, RetriesLeft - 1, Reason, Options);
                 false ->
                     {error, Reason}
             end;

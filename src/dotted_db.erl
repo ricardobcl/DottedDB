@@ -386,7 +386,7 @@ do_put(BKey={_,_} , Value, Context, Options, {?MODULE, TargetNode}) ->
     Request = [ ReqID,
                 self(),
                 BKey,
-                dotted_db_utils:encode_kv(Value),
+                Value, %dotted_db_utils:encode_kv(Value),
                 Context,
                 Options],
     _ = case node() of
@@ -547,8 +547,8 @@ wait_for_reqid(ReqID, Timeout) ->
 
 
 decode_get_reply({BinValues, Context}) ->
-    Values = [ dotted_db_utils:decode_kv(BVal) || BVal <- BinValues ],
-    {Values, Context}.
+    % Values = [ dotted_db_utils:decode_kv(BVal) || BVal <- BinValues ],
+    {BinValues, Context}.
 
 process_coverage_commands(Response=[{_,_,{ok, vs, _}}|_]) ->
     process_vnode_states(Response);
