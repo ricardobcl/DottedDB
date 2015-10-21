@@ -9,3 +9,5 @@ apps/dotted_db/src/*
 .idea/*
 DottedDB.iml
 benchmarks/tests/*
+.combo_dialyzer_plt
+.local_dialyzer_plt
