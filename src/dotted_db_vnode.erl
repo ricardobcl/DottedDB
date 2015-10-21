@@ -517,7 +517,7 @@ handle_command({restart, ReqID}, _Sender, State=#state{mode=normal}) ->
     NewVnodeID = new_vnode_id(State#state.index),
     NewReplicated = vv:reset_with_same_ids(State#state.replicated),
     CurrentPeers = dotted_db_utils:peers(State#state.index),
-    true = ets:delete(get_ets_id(OldVnodeID)),
+    true = delete_ets_all_keys(OldVnodeID),
     ok = create_ets_all_keys(NewVnodeID),
     {ok, Storage1} = dotted_db_storage:drop(State#state.storage),
     ok = dotted_db_storage:close(Storage1),
@@ -873,7 +873,7 @@ delete(State) ->
             lager:info("GOOD_DROP: {~p, ~p}",[State#state.index, node()]);
         false -> ok
     end,
-    true = ets:delete(get_ets_id(State#state.id)),
+    true = delete_ets_all_keys(State#state.id),
     {ok, State#state{storage=Storage1}}.
 
 handle_exit(_Pid, _Reason, State) ->
@@ -1018,7 +1018,7 @@ close_all(_State=#state{id          = Id,
             lager:warning("Error on closing storage: ~p",[Reason])
     end,
     ok = save_vnode_state(Dets, {Id, NodeClock, KeyLog, Replicated, NSK}),
-    true = ets:delete(get_ets_id(Id)),
+    true = delete_ets_all_keys(Id),
     ok = dets:close(Dets).
 
 get_issued_deleted_keys(Id) ->
@@ -1315,9 +1315,15 @@ new_vnode_id(Index) ->
     {Index, random:uniform(999999999999)}.
 
 create_ets_all_keys(NewVnodeID) ->
-    _ = ((ets:info(get_ets_id(NewVnodeID)) /= undefined) orelse
-        ets:new(get_ets_id(NewVnodeID), [named_table, public, set, {write_concurrency, false}])),
+    AtomID = get_ets_id(NewVnodeID),
+    _ = ((ets:info(AtomID) /= undefined) orelse
+        ets:new(AtomID, [named_table, public, set, {write_concurrency, false}])),
     ok.
+
+delete_ets_all_keys(Id) ->
+    AtomID = get_ets_id(Id),
+    _ = ((ets:info(AtomID) /= undefined) orelse ets:delete(AtomID)),
+    true.
 
 sync_merge_clocks(RemoteNodeID, RemoteClockBase, State) ->
     % get current peers node ids from replicated
