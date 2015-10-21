@@ -13,19 +13,12 @@
             , new_dir/0
         ]).
 
-%% API for ETS
--export([   sync_complete/4,
-            update_key_meta/6,
-            compute_local_info/0,
-            compute_vnode_info/0]).
-
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
          terminate/2, code_change/3]).
 
 -include_lib("dotted_db.hrl").
 
--define(FLUSH_INTERVAL, 3). % 3 seconds
 -define(WARN_INTERVAL, 1000). % Warn once a second
 -define(CURRENT_DIR, "current").
 -define(ETS, ets_dotted_db_entropy).
@@ -34,59 +27,11 @@
         stats              = [],
         start_time         = os:timestamp(),
         last_write_time    = os:timestamp(),
-        flush_interval     = ?FLUSH_INTERVAL*1000,
+        flush_interval     = ?STATS_FLUSH_INTERVAL*1000,
         timer              = undefined,
         active             = false,
         last_warn          = {0,0,0}
 }).
-
--record(sync_stat, {
-        last, 
-        min, 
-        max, 
-        count, 
-        sum, 
-        fp, 
-        tp, 
-        total, 
-        fp_size, 
-        tp_size
-}).
--type sync_stat()  :: #sync_stat{}.
-
--type sync_stats() :: {  Last   :: pos_integer(),
-                         Min    :: pos_integer(),
-                         Max    :: pos_integer(),
-                         Mean   :: pos_integer(),
-                         Sum    :: pos_integer(),
-                        {FP     :: non_neg_integer(),   %% False Positives
-                         TP     :: non_neg_integer(),   %% True Positives
-                         Total  :: non_neg_integer(),   %% Total Transfers
-                         FPS    :: non_neg_integer(),   %% False Positives Size
-                         TPS    :: non_neg_integer()}}. %% True Positives Size
-
--record(vnode_stat, {
-        meta_full       = 0,
-        meta_strip      = 0,
-        meta_full_len   = 0,
-        meta_strip_len  = 0,
-        meta_deleted    = 0,
-        meta_count      = 0,
-        nlc_size        = 0,
-        nlc_count       = 0,
-        kl_len          = 0,
-        kl_size         = 0,
-        vv_len          = 0,
-        vv_size         = 0
-}).
--type vnode_stat()  :: #vnode_stat{}.
-
-
--record(index_info, {
-    sync  = undefined :: undefined | sync_stat(),
-    vnode = undefined :: undefined |vnode_stat()
-}).
--type index_info() :: #index_info{}.
 
 
 %% ====================================================================
@@ -119,28 +64,6 @@ stop() ->
 new_dir() ->
     gen_server:call(?MODULE, new_dir).
 
--spec compute_local_info() -> [{index(), sync_stats()}].
-compute_local_info() ->
-    {ok, Ring} = riak_core_ring_manager:get_my_ring(),
-    Indices    = riak_core_ring:my_indices(Ring),
-    [{Index, get_sync_stat(Info#index_info.sync)} || 
-        {{_, Index}, Info} <- all_index_info(), lists:member(Index, Indices)].
-
-% -spec compute_vnode_info() -> [{index(), vnode_stats()}].
-compute_vnode_info() ->
-    {ok, Ring} = riak_core_ring_manager:get_my_ring(),
-    Indices    = riak_core_ring:my_indices(Ring),
-    [{Index, get_vnode_stat(Info#index_info.vnode)} || 
-        {{_, Index}, Info} <- all_index_info(), lists:member(Index, Indices)].
-
-%% @doc Store information about a just-completed AAE exchange
-sync_complete(Index, Repaired, Sent, {PayloadSize, MetaSize}) ->
-    update_ets_info({index, Index}, {sync_complete, Repaired, Sent, {PayloadSize, MetaSize}}).
-
-update_key_meta(_, 0, _, _, _, _) -> ok;
-update_key_meta(Index, Count, MetaFull, MetaStrip, MetaFullLen, MetaStripLen) ->
-    update_ets_info({index, Index}, {update_key_meta, Count, MetaFull, MetaStrip, MetaFullLen, MetaStripLen}).
-
 
 %% ====================================================================
 %% gen_server callbacks
@@ -153,23 +76,6 @@ init([Stats]) ->
     process_flag(trap_exit, true),
     process_flag(priority, normal),
 
-    % %% Spin up folsom
-    % folsom:start(),
-
-    % %% Create the stats directory and setups the output file handles for dumping
-    % %% periodic CSV of histogram results.
-    % init_histogram_files(Stats),
-
-    % %% Setup a histogram and counter for each operation -- we only track stats
-    % %% on successful operations
-    % [begin
-    %      folsom_metrics:new_histogram({stats, Op}, slide, ReportInterval),
-    %      folsom_metrics:new_counter({units, Op})
-    %  end || Op <- Stats],
-
-    % %% Schedule next write/reset of data
-    % ReportIntervalSec = timer:seconds(?FLUSH_INTERVAL),
-
     %% Create the stats directory and setups the output file handles for dumping
     %% periodic CSV of histogram results.
     _ = init_histogram_files(Stats, true),
@@ -177,7 +83,7 @@ init([Stats]) ->
     _ = [create_stat_folsom(Stat) || Stat <- Stats],
 
     {ok, #state{ stats = Stats,
-                 flush_interval = timer:seconds(?FLUSH_INTERVAL)}}.
+                 flush_interval = timer:seconds(?STATS_FLUSH_INTERVAL)}}.
 
 %% Synchronous calls
 handle_call(start, _From, State) ->
@@ -276,109 +182,10 @@ code_change(_OldVsn, State, _Extra) ->
 %% Internal functions
 %% ====================================================================
 
-%%%%%%%%%
-%% ETS
-%%%%%%%%%
 create_table() ->
     (ets:info(?ETS) /= undefined) orelse
         ets:new(?ETS, [named_table, public, set, {write_concurrency, true}]).
 
-%% Utility function to get stored information for a given index,
-%% invoke `handle_ets_info` to update the information, and then
-%% store the new info back into the ETS table.
--spec update_ets_info({atom(), index()}, term()) -> ok.
-update_ets_info(Key, Cmd) ->
-    Info = case ets:lookup(?ETS, {index, Key}) of
-               [] ->
-                   #index_info{};
-               [{_, I}] ->
-                   I
-           end,
-    Info2 = handle_ets_info(Cmd, Info),
-    ets:insert(?ETS, {{index, Key}, Info2}),
-    ok.
-
-%% Update provided index info based on request.
--spec handle_ets_info(term(), index_info()) -> index_info().
-handle_ets_info({sync_complete, Repaired, Sent, {PayloadSize, MetaSize}}, Info) ->
-    Sync = update_sync_complete(Repaired, Sent, {PayloadSize, MetaSize}, Info#index_info.sync),
-    Info#index_info{sync=Sync};
-
-handle_ets_info({update_key_meta, Count, MetaFull, MetaStrip, MetaFullLen, MetaStripLen}, Info) ->
-    Vnode = update_key_meta_info(Count, MetaFull, MetaStrip, MetaFullLen, MetaStripLen, Info#index_info.vnode),
-    Info#index_info{vnode=Vnode}.
-
-
-update_key_meta_info(Count, MetaFull, MetaStrip, MetaFullLen, MetaStripLen, undefined) ->
-    update_key_meta_info(Count, MetaFull, MetaStrip, MetaFullLen, MetaStripLen, #vnode_stat{});
-update_key_meta_info(Count, MetaFull, MetaStrip, MetaFullLen, MetaStripLen, 
-                            Vnode=#vnode_stat{ meta_full=MF, 
-                                               meta_strip=MS, 
-                                               meta_count=MC,
-                                               meta_full_len=MFL,
-                                               meta_strip_len=MSL}) ->
-    Vnode#vnode_stat{   meta_full       = MetaFull + MF,
-                        meta_strip      = MetaStrip + MS,
-                        meta_full_len   = MetaFullLen + MFL,
-                        meta_strip_len  = MetaStripLen + MSL,
-                        meta_count      = MC + Count}.
-
-get_vnode_stat(undefined) ->
-    get_vnode_stat(#vnode_stat{});
-get_vnode_stat(#vnode_stat{     meta_full=MF, 
-                                meta_strip=MS, 
-                                meta_count=MC,
-                                meta_full_len=MFL,
-                                meta_strip_len=MSL}) ->
-    Savings    = 1 - (MS / max(1, MF)),
-    SavingsL   = 1 - (MSL / max(1, MFL)),
-    MeanF      = MF  / max(1, MC),
-    MeanS      = MS  / max(1, MC),
-    MeanFL     = MFL / max(1, MC),
-    MeanSL     = MSL / max(1, MC),
-    {MC, MF, MS, Savings, MeanF, MeanS, SavingsL, MeanFL, MeanSL}.
-
-
-
-
-
-update_sync_complete(Repaired, Sent, {PayloadSize, MetaSize}, undefined) ->
-    S = init_sync_stat(undefined),
-    update_sync_complete(Repaired, Sent, {PayloadSize, MetaSize}, S);
-update_sync_complete(Repaired, Sent, {PayloadSize, MetaSize}, S=#sync_stat{max=Max, min=Min, 
-                            sum=Sum, count=_Cnt, total=Total, tp=TP, fp=FP, tp_size=TPSize, fp_size=FPSize}) -> 
-    S#sync_stat{     last    = Repaired,
-                     max     = erlang:max(Repaired, Max),
-                     min     = erlang:min(Repaired, Min),
-                     sum     = Sum+Repaired,
-                     total   = Total + Sent,
-                     tp      = TP + Repaired,
-                     fp      = FP + Sent,
-                     tp_size = TPSize + PayloadSize,
-                     fp_size = FPSize + MetaSize}.
-
-init_sync_stat(undefined) ->
-    #sync_stat{last=0, min=0, max=0, sum=0, count=0, fp=0, tp=0, total=0, fp_size=0, tp_size=0}.
-
-get_sync_stat(undefined) ->
-    get_sync_stat(init_sync_stat(undefined));
-get_sync_stat(#sync_stat{last=Last, max=Max, min=Min, sum=Sum, count=_Cnt,
-                        fp=FP, tp=TP, total=Total, tp_size=TPSize, fp_size=FPSize}) ->
-    FPRate    = FP / max(1, (FP+TP)),%wrong
-    TotalRate = TP / max(1, Total),
-    Mean      = Sum div max(1, Total),
-    {Last, Min, Max, Mean, Sum, {FP, TP, FPRate, Total, TotalRate, FPSize, TPSize}}.
-
-
-%% Return a list of all stored index information.
--spec all_index_info() -> [{{atom(), index()}, index_info()}].
-all_index_info() ->
-    ets:select(?ETS, [{{{index, '$1'}, '$2'}, [], [{{'$1','$2'}}]}]).
-
-
-%%%%%%%%%%%%%%%%
-%% gen_server
-%%%%%%%%%%%%%%%
 
 process_stats(Now, State) ->
     %% Determine how much time has elapsed (seconds) since our last report
@@ -452,7 +259,7 @@ new_dir_name() ->
 create_stat_folsom({counter, Name}) ->
     ok = folsom_metrics:new_counter({counter, Name});
 create_stat_folsom({histogram, Name}) ->
-    ok = folsom_metrics:new_histogram({histogram, Name}, slide, ?FLUSH_INTERVAL),
+    ok = folsom_metrics:new_histogram({histogram, Name}, slide, ?STATS_FLUSH_INTERVAL),
     ok = folsom_metrics:new_counter({units, Name}).
 
 %% @doc Create the stats directory and setups the output file handles for dumping

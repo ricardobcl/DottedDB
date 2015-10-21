@@ -376,17 +376,17 @@ handle_command({sync_start, ReqID}, _Sender, State=#state{mode=normal}) ->
     NodeB = {IndexB, _} = dotted_db_utils:random_from_list(dotted_db_utils:peers(State#state.index)),
     % get the NodeB entry from this node clock
     EntryB = bvv:get(IndexB, State#state.clock),
-    % update this node sync stats
-    NewLastAttempt = os:timestamp(),
-    Fun = fun ({PI, ToCounter, FromCounter, LastAttempt, LastExchange}) ->
-            case PI =:= IndexB of
-                true -> {PI, ToCounter + 1, FromCounter, NewLastAttempt, LastExchange};
-                false -> {PI, ToCounter, FromCounter, LastAttempt, LastExchange}
-            end
-          end,
-    Syncs = lists:map(Fun, State#state.syncs),
+    % % update this node sync stats
+    % NewLastAttempt = os:timestamp(),
+    % Fun = fun ({PI, ToCounter, FromCounter, LastAttempt, LastExchange}) ->
+    %         case PI =:= IndexB of
+    %             true -> {PI, ToCounter + 1, FromCounter, NewLastAttempt, LastExchange};
+    %             false -> {PI, ToCounter, FromCounter, LastAttempt, LastExchange}
+    %         end
+    %       end,
+    % Syncs = lists:map(Fun, State#state.syncs),
     % send a sync message to that node
-    {reply, {ok, ReqID, State#state.id, NodeB, EntryB}, State#state{syncs = Syncs}};
+    {reply, {ok, ReqID, State#state.id, NodeB, EntryB}, State};
 
 
 handle_command({sync_missing, ReqID, _, _}, _Sender, State=#state{mode=recovering}) ->
@@ -412,10 +412,11 @@ handle_command({sync_missing, ReqID, RemoteID={_,_}, LocalEntryInRemoteClock}, _
     % Optionally collect stats
     Syncs = case State#state.stats andalso MissingKeys > 0 of
         true ->
-            Ratio_Relevant_Keys = round(100*length(RelevantMissingKeys)/max(1,length(MissingKeys))),
-            dotted_db_stats:notify({histogram, sync_relevant_ratio}, Ratio_Relevant_Keys),
             case length(StrippedObjects) > 0 of
                 true ->
+                    Ratio_Relevant_Keys = round(100*length(RelevantMissingKeys)/max(1,length(MissingKeys))),
+                    dotted_db_stats:notify({histogram, sync_relevant_ratio}, Ratio_Relevant_Keys),
+                    
                     Ctx_Sent_Strip = [dcc:context(DCC) || {_Key, DCC} <- StrippedObjects],
                     Sum_Ctx_Sent_Strip = lists:sum([length(DCC) || DCC <- Ctx_Sent_Strip]),
                     Ratio_Sent_Strip = Sum_Ctx_Sent_Strip/max(1,length(StrippedObjects)),
@@ -431,15 +432,16 @@ handle_command({sync_missing, ReqID, RemoteID={_,_}, LocalEntryInRemoteClock}, _
                     dotted_db_stats:notify({histogram, sync_sent_missing}, length(StrippedObjects));
                 false -> ok
             end,
-            % update this node sync stats
-            NewLastAttempt = os:timestamp(),
-            Fun = fun ({PI, ToCounter, FromCounter, LastAttempt, LastExchange}) ->
-                    case PI =:= RemoteID of
-                        true -> {PI, ToCounter, FromCounter + 1, NewLastAttempt, LastExchange};
-                        false -> {PI, ToCounter, FromCounter, LastAttempt, LastExchange}
-                    end
-                  end,
-            lists:map(Fun, State#state.syncs);
+            % % update this node sync stats
+            % NewLastAttempt = os:timestamp(),
+            % Fun = fun ({PI, ToCounter, FromCounter, LastAttempt, LastExchange}) ->
+            %         case PI =:= RemoteID of
+            %             true -> {PI, ToCounter, FromCounter + 1, NewLastAttempt, LastExchange};
+            %             false -> {PI, ToCounter, FromCounter, LastAttempt, LastExchange}
+            %         end
+            %       end,
+            % lists:map(Fun, State#state.syncs);
+            State#state.syncs;
         false -> State#state.syncs
     end,
     % send the final objects and the base (contiguous) dots of the node clock to the asking node
@@ -484,15 +486,16 @@ handle_command({sync_repair, ReqID, RemoteNodeID={_,_}, RemoteClockBase, Missing
             Hit_Ratio =/= 0.0 andalso Sent =/= 0 andalso
                 dotted_db_stats:notify({histogram, sync_hit_ratio}, Hit_Ratio),
 
-            % update this node sync stats
-            NewLastExchange = os:timestamp(),
-            Fun = fun ({PI, ToCounter, FromCounter, LastAttempt, LastExchange}) ->
-                    case PI =:= RemoteNodeID of
-                        true -> {PI, ToCounter, FromCounter, LastAttempt, NewLastExchange};
-                        false -> {PI, ToCounter, FromCounter, LastAttempt, LastExchange}
-                    end
-                  end,
-            lists:map(Fun, State2#state.syncs);
+            % % update this node sync stats
+            % NewLastExchange = os:timestamp(),
+            % Fun = fun ({PI, ToCounter, FromCounter, LastAttempt, LastExchange}) ->
+            %         case PI =:= RemoteNodeID of
+            %             true -> {PI, ToCounter, FromCounter, LastAttempt, NewLastExchange};
+            %             false -> {PI, ToCounter, FromCounter, LastAttempt, LastExchange}
+            %         end
+            %       end,
+            % lists:map(Fun, State2#state.syncs);
+            State#state.syncs;
         false ->
             State2#state.syncs
     end,
@@ -742,16 +745,16 @@ handle_info(strip_keys, State=#state{non_stripped_keys=NSKeys}) ->
     % Optionally collect stats
     case State#state.stats of
         true ->
-            {D1,W1} = NSKeys,
-            {D2,W2} = NSKeys2,
-            NumNSKeys = lists:sum([dict:size(Dict) || {_,Dict} <- W1]) + length(D1),
-            NumNSKeys2 = lists:sum([dict:size(Dict) || {_,Dict} <- W2]) + length(D2),
-            CCF = NumNSKeys * ?REPLICATION_FACTOR,
-            CCS = NumNSKeys2 * ?REPLICATION_FACTOR, % we don't really know, but assume the worst
-            EntryExampleSize = byte_size(term_to_binary({State#state.id, 123345})),
-            MetaF = EntryExampleSize * ?REPLICATION_FACTOR * NumNSKeys,
-            MetaS = EntryExampleSize * CCS,
-            dotted_db_stats:update_key_meta(State#state.index, NumNSKeys, MetaF, MetaS, CCF, CCS),
+            % {D1,W1} = NSKeys,
+            % {D2,W2} = NSKeys2,
+            % NumNSKeys = lists:sum([dict:size(Dict) || {_,Dict} <- W1]) + length(D1),
+            % NumNSKeys2 = lists:sum([dict:size(Dict) || {_,Dict} <- W2]) + length(D2),
+            % CCF = NumNSKeys * ?REPLICATION_FACTOR,
+            % CCS = NumNSKeys2 * ?REPLICATION_FACTOR, % we don't really know, but assume the worst
+            % EntryExampleSize = byte_size(term_to_binary({State#state.id, 123345})),
+            % MetaF = EntryExampleSize * ?REPLICATION_FACTOR * NumNSKeys,
+            % MetaS = EntryExampleSize * CCS,
+            % dotted_db_stats:update_key_meta(State#state.index, NumNSKeys, MetaF, MetaS, CCF, CCS),
             ok;
         false -> ok
     end,
@@ -965,15 +968,16 @@ initialize_replicated(NodeId={Index,_}) ->
     ok.
 
 % @doc Initializes the "sync" stats for peers of this vnode.
-initialize_syncs(Index) ->
-    % get this node's peers, i.e., all nodes that replicates any subset of local keys.
-    PeerIDs = [ ID || {ID, _Node} <- dotted_db_utils:peers(Index)],
-    % for replication factor N = 3, the numbers of peers should be 4 (2 vnodes before and 2 after).
-    (?REPLICATION_FACTOR-1)*2 = length(PeerIDs),
-    Now = os:timestamp(),
-    Syncs = lists:foldl(fun (ID, List) -> [{ID,0,0,Now,Now} | List] end , [], PeerIDs),
-    (?REPLICATION_FACTOR-1)*2 = length(Syncs),
-    Syncs.
+initialize_syncs(_Index) ->
+    [{dummy_node_id,0,0,0,0}].
+%     % get this node's peers, i.e., all nodes that replicates any subset of local keys.
+%     PeerIDs = [ ID || {ID, _Node} <- dotted_db_utils:peers(Index)],
+%     % for replication factor N = 3, the numbers of peers should be 4 (2 vnodes before and 2 after).
+%     (?REPLICATION_FACTOR-1)*2 = length(PeerIDs),
+%     Now = os:timestamp(),
+%     Syncs = lists:foldl(fun (ID, List) -> [{ID,0,0,Now,Now} | List] end , [], PeerIDs),
+%     (?REPLICATION_FACTOR-1)*2 = length(Syncs),
+%     Syncs.
 
 
 % @doc Returns the Storage for this vnode.

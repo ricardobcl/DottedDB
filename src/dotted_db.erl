@@ -40,8 +40,6 @@
          delete_at_node/4,
          sync/0,
          sync_at_node/1,
-         aae_status/0,
-         vnode_status/0,
          test/0,
          test/1,
          update/1,
@@ -458,110 +456,6 @@ do_sync({?MODULE, TargetNode}) ->
     % dotted_db_utils:pp(Stats).
 
 
-aae_status() ->
-    LocalInfo = dotted_db_stats:compute_local_info(),
-    aae_sync_status(LocalInfo).
-
-aae_sync_status(ExchangeInfo) ->
-    io:format("~s~n", [string:centre(" Keys Repaired ", 129, $=)]),
-    io:format("~-49s  ~s  ~s  ~s  ~s  ~s  ~s  ~s  ~s~n", ["Index",
-                                      string:centre("Last", 8),
-                                      string:centre("Mean", 8),
-                                      string:centre("Max", 8),
-                                      string:centre("Hits", 8),
-                                      string:centre("Total", 8),
-                                      string:centre("Hit (%)", 8),
-                                      string:centre("Meta", 8),
-                                      string:centre("Payload", 8)]),
-    io:format("~129..-s~n", [""]),
-    _ = [begin
-         [TotalRate2] = io_lib:format("~.3f",[TotalRate*100]),
-         FPSize2 = dotted_db_utils:human_filesize(FPSize),
-         TPSize2 = dotted_db_utils:human_filesize(TPSize),
-         io:format("~-49b  ~s  ~s  ~s  ~s  ~s  ~s  ~s  ~s  ~s  ~s~n", [Index,
-                                           string:centre(integer_to_list(Last), 8),
-                                           string:centre(integer_to_list(Mean), 8),
-                                           string:centre(integer_to_list(Max), 8),
-                                           string:centre(integer_to_list(Sum), 8),
-                                           string:centre(integer_to_list(Total), 8),
-                                           string:centre(TotalRate2++" %", 8),
-                                           string:centre(FPSize2, 8),
-                                           string:centre(TPSize2, 8),
-                                           string:centre(integer_to_list(FP), 8),
-                                           string:centre(integer_to_list(TP), 8)]),
-         ok
-     end || {Index, {Last,_Min,Max,Mean,Sum,{FP,TP,_FPRate,Total,TotalRate,FPSize,TPSize}}} <- ExchangeInfo],
-
-    {SumA, TotalA, TotalRateA, FPSizeA, TPSizeA} = average_exchange_info(ExchangeInfo),
-    [TotalRateA2]   = io_lib:format("~.3f",[TotalRateA*100]),
-    [SumA2]         = io_lib:format("~.3f",[SumA]),
-    [TotalA2]       = io_lib:format("~.3f",[TotalA]),
-    FPSizeA2        = dotted_db_utils:human_filesize(FPSizeA),
-    TPSizeA2        = dotted_db_utils:human_filesize(TPSizeA),
-    io:format("~-49s  ~s  ~s  ~s  ~s  ~s  ~s  ~s  ~s~n", ["all",
-                                      string:centre("", 8),
-                                      string:centre("", 8),
-                                      string:centre("", 8),
-                                      string:centre(SumA2, 8),
-                                      string:centre(TotalA2, 8),
-                                      string:centre(TotalRateA2++" %", 8),
-                                      string:centre(FPSizeA2, 8),
-                                      string:centre(TPSizeA2, 8)]),
-    ok.
-
-average_exchange_info(ExchangeInfo) ->
-    ExchangeInfo2 = [E || E={_,S} <- ExchangeInfo, S =/= undefined],
-    FoldFun = 
-        fun ({_, {_,_,_,_,Sum,{_,_,_,Total,TotalRate,FPSize,TPSize}}}, 
-                _Acc={Sum2, Total2, TotalRate2, FPSize2, TPSize2}) ->
-            {Sum+Sum2, Total+Total2, TotalRate+TotalRate2, FPSize+FPSize2, TPSize+TPSize2}
-        end,
-    {Sum, Total, TotalRate, FPSize, TPSize} = lists:foldl(FoldFun, {0,0,0,0,0}, ExchangeInfo2),
-    L = max(1, length(ExchangeInfo2)),
-    {Sum/L, Total/L, TotalRate/L, FPSize/L, TPSize/L}.
-
-vnode_status() ->
-    VnodeInfo = dotted_db_stats:compute_vnode_info(),
-    print_vnode_status(VnodeInfo).
-
-print_vnode_status(VnodeInfo) ->
-    io:format("~s~n", [string:centre(" Vnode Stats ", 139, $=)]),
-    io:format("~-49s  ~s  ~s  ~s  ~s  ~s  ~s ~s  ~s  ~s~n", ["Index",
-                                      string:centre("Total", 8),
-                                      string:centre("MetaF", 8),
-                                      string:centre("MetaS", 8),
-                                      string:centre("Save (%)", 8),
-                                      string:centre("MeanF", 8),
-                                      string:centre("MeanS", 8),
-                                      string:centre("SaveL (%)", 8),
-                                      string:centre("MeanFL", 8),
-                                      string:centre("MeanSL", 8)]),
-    io:format("~139..-s~n", [""]),
-    _ = [begin
-         [Savings2] = io_lib:format("~.2f",[Savings*100]),
-         [SavingsL2] = io_lib:format("~.2f",[SavingsL*100]),
-         [MeanFL2] = io_lib:format("~.3f",[MeanFL]),
-         [MeanSL2] = io_lib:format("~.3f",[MeanSL]),
-         MF2 = dotted_db_utils:human_filesize(MF),
-         MS2 = dotted_db_utils:human_filesize(MS),
-         MeanF2 = dotted_db_utils:human_filesize(MeanF),
-         MeanS2 = dotted_db_utils:human_filesize(MeanS),
-         io:format("~-49b  ~s  ~s  ~s  ~s  ~s  ~s  ~s  ~s  ~s~n", [Index,
-                                           string:centre(integer_to_list(MC), 8),
-                                           string:centre(MF2, 8),
-                                           string:centre(MS2, 8),
-                                           string:centre(Savings2++" %", 8),
-                                           string:centre(MeanF2, 8),
-                                           string:centre(MeanS2, 8),
-                                           string:centre(SavingsL2++" %", 8),
-                                           string:centre(MeanFL2, 8),
-                                           string:centre(MeanSL2, 8)]),
-         ok
-     end || {Index, {MC, MF, MS, Savings, MeanF, MeanS, SavingsL, MeanFL, MeanSL}} <- VnodeInfo],
-    ok.
-
-
-
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%% OTHER
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -748,15 +642,15 @@ color_good_if_zero(Message, Number) ->
     end.
 
 process_vnode_state({Index, _Node, {ok, vs, {state, _Id, Index, NodeClock, _Storage,
-         _Replicated, KeyLog, NSK, _NSKInterval, RKeys, _Updates_mem, _Dets, _Stats, Syncs, _Mode, _ReportInterval}}}) ->
+         _Replicated, KeyLog, NSK, _NSKInterval, RKeys, _Updates_mem, _Dets, _Stats, _Syncs, _Mode, _ReportInterval}}}) ->
     % ?PRINT(NodeClock),
     MissingDots = [ miss_dots(Entry) || {_,Entry} <- NodeClock ],
     {Keys, Size} = KeyLog,
-    Now = os:timestamp(),
-    Fun = fun ({PI, ToCounter, FromCounter, LastAttempt, LastExchange}) ->
-                {PI, ToCounter, FromCounter, timer:now_diff(Now, LastAttempt)/1000, timer:now_diff(Now, LastExchange)/1000}
-          end,
-    Syncs2 = lists:map(Fun, Syncs),
+    % Now = os:timestamp(),
+    % Fun = fun ({PI, ToCounter, FromCounter, LastAttempt, LastExchange}) ->
+    %             {PI, ToCounter, FromCounter, timer:now_diff(Now, LastAttempt)/1000, timer:now_diff(Now, LastExchange)/1000}
+    %       end,
+    % Syncs2 = lists:map(Fun, Syncs),
     {SizeNSK,LengthNSK1,LengthNSK2} = NSK,
     LengthRKeys = case RKeys of
         [] -> 0;
@@ -770,7 +664,7 @@ process_vnode_state({Index, _Node, {ok, vs, {state, _Id, Index, NodeClock, _Stor
         , clock_len     => orddict:size(NodeClock)
         , keys          => Keys %length(Keys)
         , kl_size       => Size %byte_size(term_to_binary(KeyLog))
-        , syncs         => Syncs2
+        % , syncs         => Syncs2
         , nsk_size      => SizeNSK
         , nsk_len1      => LengthNSK1
         , nsk_len2      => LengthNSK2
