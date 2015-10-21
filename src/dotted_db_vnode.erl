@@ -740,7 +740,11 @@ handle_info(report_tick, State) ->
     State1 = maybe_tick(State),
     {ok, State1};
 %% Buffer Strip Tick
-handle_info(strip_keys, State=#state{non_stripped_keys=NSKeys}) ->
+handle_info(strip_keys, State=#state{mode=recovering}) ->
+    % schedule the strip for keys that still have causal context at the moment
+    schedule_strip_keys(State#state.buffer_strip_interval),
+    {ok, State};
+handle_info(strip_keys, State=#state{mode=normal, non_stripped_keys=NSKeys}) ->
     NSKeys2 = read_strip_write(NSKeys, State),
     % Optionally collect stats
     case State#state.stats of
