@@ -17,7 +17,7 @@
 
 start(Request, Timeout) ->
     ReqId = dotted_db_utils:make_request_id(),
-    {ok, _} = dotted_db_coverage_fsm_sup:start_fsm([ReqId, self(), Request, Timeout]),
+    {ok, _} = dotted_db_coverage_fsm_sup:start_coverage_fsm([ReqId, self(), Request, Timeout]),
     receive
         {ReqId, Val} -> Val
     end.
