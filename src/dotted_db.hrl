@@ -26,6 +26,11 @@
 -define(REPLICATION_FAIL_RATIO, repl_fail_ratio).
 -define(DEFAULT_REPLICATION_FAIL_RATIO, 0). % ratio of "lost" replicated put/deletes
 
+%% Options for vnodes
+-define(REPORT_TICK_INTERVAL, 1000). % interval between report stats
+-define(BUFFER_STRIP_INTERVAL, 1000). % interval between attempts to strip local keys (includes replicated keys)
+-define(MAX_KEYS_SENT_RECOVERING, 1000). % max sent at a time to a restarting node.
+
 -define(OPT_TIMEOUT, opt_timeout).
 
 -type bucket()     :: term().

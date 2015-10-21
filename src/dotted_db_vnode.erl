@@ -57,6 +57,8 @@
         % the left list is a set of deleted keys, not yet stripped;
         % the right side is a list of (vnode, map), where the map is between dots and keys not yet completely stripped
         non_stripped_keys :: {[key()], [{id(), dict:dict()}]},
+        % interval in which the vnode tries to strip the non-stripped-keys
+        buffer_strip_interval :: non_neg_integer(),
         % temporary list of nodes recovering from failure and a list of keys to send
         recover_keys :: [{id(), [bkey()]}],
         % number of updates (put or deletes) since saving node state to storage
@@ -68,16 +70,13 @@
         % syncs stats
         syncs       :: [{id(), integer(), integer(), os:timestamp(), os:timestamp()}],
         % what mode the vnode is on
-        mode        :: {normal, recovering}
+        mode        :: normal | recovering
     }).
 
 -type state() :: #state{}.
 
 -define(MASTER, dotted_db_vnode_master).
 -define(UPDATE_LIMITE, 100). % save vnode state every 100 updates
--define(REPORT_TICK_INTERVAL, 1000). % interval between report stats
--define(BUFFER_STRIP_INTERVAL, 1000). % interval between attempts to strip local keys (includes replicated keys)
--define(MAX_KEYS_SENT, 1000). % max sent at a time to a restarting node.
 -define(VNODE_STATE_FILE, "dotted_db_vnode_state").
 -define(VNODE_STATE_KEY, "dotted_db_vnode_state_key").
 
@@ -204,19 +203,20 @@ init([Index]) ->
     schedule_strip_keys(2000),
     {ok, #state{
         % for now, lets use the index in the consistent hash as the vnode ID
-        id                  = NodeId3,
-        index               = Index,
-        clock               = NodeClock2,
-        replicated          = Replicated2,
-        keylog              = KeyLog2,
-        non_stripped_keys   = NonStrippedKeys2,
-        recover_keys        = [],
-        storage             = Storage,
-        dets                = Dets,
-        updates_mem         = 0,
-        stats               = true,
-        syncs               = initialize_syncs(Index),
-        mode                = normal
+        id                      = NodeId3,
+        index                   = Index,
+        clock                   = NodeClock2,
+        replicated              = Replicated2,
+        keylog                  = KeyLog2,
+        non_stripped_keys       = NonStrippedKeys2,
+        buffer_strip_interval   = ?BUFFER_STRIP_INTERVAL,
+        recover_keys            = [],
+        storage                 = Storage,
+        dets                    = Dets,
+        updates_mem             = 0,
+        stats                   = true,
+        syncs                   = initialize_syncs(Index),
+        mode                    = normal
         }
     }.
 
@@ -549,7 +549,7 @@ handle_command({inform_peers_restart, {ReqID, RestartingVnode, OldVnodeID, NewVn
                     lists:member(RestartingVnode, RN)
                 end,
     RelevantKeys = lists:filter(FunFilter, AllKeys),
-    {Now, Later} = lists:split(min(?MAX_KEYS_SENT,length(RelevantKeys)), RelevantKeys),
+    {Now, Later} = lists:split(min(?MAX_KEYS_SENT_RECOVERING,length(RelevantKeys)), RelevantKeys),
     lager:info("Restart transfer => Now: ~p Later: ~p",[length(Now), length(Later)]),
     % get each key's respective DCC
     RelevantMissingObjects = [{Key, guaranteed_get(Key, State)} || Key <- Now],
@@ -585,7 +585,7 @@ handle_command({inform_peers_restart2, {ReqID, NewVnodeID}}, _Sender, State) ->
                 {true, [], State#state.recover_keys};
             RelevantKeys ->
                 RK = proplists:delete(NewVnodeID, State#state.recover_keys),
-                {Now, Later} = lists:split(min(?MAX_KEYS_SENT,length(RelevantKeys)), RelevantKeys),
+                {Now, Later} = lists:split(min(?MAX_KEYS_SENT_RECOVERING,length(RelevantKeys)), RelevantKeys),
                 % get each key's respective DCC
                 RelevantMissingObjects = [{Key, guaranteed_get(Key, State)} || Key <- Now],
                 % strip any unnecessary causal information to save network bandwidth
@@ -753,7 +753,7 @@ handle_info(strip_keys, State=#state{non_stripped_keys=NSKeys}) ->
         false -> ok
     end,
     % schedule the strip for keys that still have causal context at the moment
-    schedule_strip_keys(?BUFFER_STRIP_INTERVAL),
+    schedule_strip_keys(State#state.buffer_strip_interval),
     {ok, State#state{non_stripped_keys=NSKeys2}};
 handle_info(Info, State) ->
     lager:info("unhandled_info: ~p",[Info]),
