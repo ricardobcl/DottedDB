@@ -128,7 +128,7 @@ restart_at_node(IndexNode, {?MODULE, TargetNode}) ->
                 self(),
                 IndexNode,
                 []],
-    case node() of
+    _ = case node() of
         % if this node is already the target node
         TargetNode ->
             dotted_db_restart_fsm_sup:start_restart_fsm(Request);
@@ -251,7 +251,7 @@ do_get(BKey={_,_}, Options, {?MODULE, TargetNode}) ->
                 self(),
                 BKey,
                 Options],
-    case node() of
+    _ = case node() of
         % if this node is already the target node
         TargetNode ->
             dotted_db_get_fsm_sup:start_get_fsm(Request);
@@ -391,7 +391,7 @@ do_put(BKey={_,_} , Value, Context, Options, {?MODULE, TargetNode}) ->
                 dotted_db_utils:encode_kv(Value),
                 Context,
                 Options],
-    case node() of
+    _ = case node() of
         TargetNode ->
             dotted_db_put_fsm_sup:start_put_fsm(Request);
         _ ->
@@ -406,7 +406,7 @@ sanitize_options_put(Options) when is_list(Options) ->
     Options1 = proplists:unfold(Options),
     %% Default number of replica nodes contacted to the replication factor.
     <<A:32, B:32, C:32>> = crypto:rand_bytes(12),
-    random:seed({A,B,C}),
+    _ = random:seed({A,B,C}),
     FailRate = proplists:get_value(?REPLICATION_FAIL_RATIO, Options1, ?DEFAULT_REPLICATION_FAIL_RATIO),
     ReplicateXNodes = compute_real_replication_factor(FailRate, ?REPLICATION_FACTOR-1,?REPLICATION_FACTOR-1) + 1,
     % lager:debug("FailRate: ~p and ReplicateXNodes: ~p", [FailRate, ReplicateXNodes]),
@@ -447,7 +447,7 @@ do_sync({?MODULE, TargetNode}) ->
     Vnodes = dotted_db_utils:vnodes_from_node(TargetNode),
     Node = dotted_db_utils:random_from_list(Vnodes),
     Request = [ReqID, self(), Node],
-    case node() of
+    _ = case node() of
         TargetNode ->
             dotted_db_sync_fsm:start(ReqID, self(), Node);
         _ ->
@@ -748,7 +748,7 @@ color_good_if_zero(Message, Number) ->
     end.
 
 process_vnode_state({Index, _Node, {ok, vs, {state, _Id, Index, NodeClock, _Storage,
-                    _Replicated, KeyLog, NSK, RKeys, _Updates_mem, _Dets, _Stats, Syncs, _Mode}}}) ->
+         _Replicated, KeyLog, NSK, _NSKInterval, RKeys, _Updates_mem, _Dets, _Stats, Syncs, _Mode, _ReportInterval}}}) ->
     % ?PRINT(NodeClock),
     MissingDots = [ miss_dots(Entry) || {_,Entry} <- NodeClock ],
     {Keys, Size} = KeyLog,

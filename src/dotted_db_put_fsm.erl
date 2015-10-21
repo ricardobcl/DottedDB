@@ -19,7 +19,7 @@
     req_id          :: pos_integer(),
     from            :: pid(),
     %% The node coordination this request (must be a replica node for this key).
-    coordinator     :: node(),
+    coordinator     :: [index_node()],
     %% Operation can be a write or a delete.
     operation       :: operation(),
     %$ The key being written.

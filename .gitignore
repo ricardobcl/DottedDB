@@ -11,3 +11,6 @@ DottedDB.iml
 benchmarks/tests/*
 .combo_dialyzer_plt
 .local_dialyzer_plt
+dialyzer_unhandled_warnings
+dialyzer_warnings
+dialyzer.ignore-warnings

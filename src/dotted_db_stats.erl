@@ -83,8 +83,8 @@
 
 
 -record(index_info, {
-    sync  = undefined :: sync_stat(),
-    vnode = undefined :: vnode_stat()
+    sync  = undefined :: undefined | sync_stat(),
+    vnode = undefined :: undefined |vnode_stat()
 }).
 -type index_info() :: #index_info{}.
 
@@ -148,7 +148,7 @@ update_key_meta(Index, Count, MetaFull, MetaStrip, MetaFullLen, MetaStripLen) ->
 
 init([Stats]) ->
     %% Create the ETS table for (cumulative?) stats
-    create_table(),
+    _ = create_table(),
     %% Trap exits so we have a chance to flush data
     process_flag(trap_exit, true),
     process_flag(priority, normal),
@@ -172,9 +172,9 @@ init([Stats]) ->
 
     %% Create the stats directory and setups the output file handles for dumping
     %% periodic CSV of histogram results.
-    init_histogram_files(Stats, true),
+    _ = init_histogram_files(Stats, true),
     %% Register each new stat with folsom.
-    [create_stat_folsom(Stat) || Stat <- Stats],
+    _ = [create_stat_folsom(Stat) || Stat <- Stats],
 
     {ok, #state{ stats = Stats,
                  flush_interval = timer:seconds(?FLUSH_INTERVAL)}}.
@@ -194,7 +194,7 @@ handle_call(stop, _From, State) ->
     {ok, cancel} = timer:cancel(State#state.timer),
     %% Flush data to disk
     Now = os:timestamp(),
-    process_stats(Now, State),
+    _ = process_stats(Now, State),
     {reply, ok, State#state{    last_write_time = Now,
                                 timer = undefined,
                                 active = false}};
@@ -204,14 +204,14 @@ handle_call({add_stats, NewStats}, _From, State = #state{stats = CurrentStats}) 
     ?PRINT(NewStats),
     %% Create the stats directory and setups the output file handles for dumping
     %% periodic CSV of histogram results.
-    init_histogram_files(NewStats),
+    _ = init_histogram_files(NewStats),
     %% Register each new stat with folsom.
-    [create_stat_folsom(Stat) || Stat <- NewStats],
+    _ = [create_stat_folsom(Stat) || Stat <- NewStats],
     {reply, ok, State#state{stats = CurrentStats ++ NewStats}};
 
 handle_call(new_dir, _From, State) ->
     %% Create a new folder for stats and point ?CURRENT_DIR to it.
-    init_histogram_files(State#state.stats, true),
+    _ = init_histogram_files(State#state.stats, true),
     {reply, ok, State}.
 
 
@@ -245,24 +245,24 @@ handle_cast({notify, {histogram, Name}, Value}, State = #state{
             lager:warning("dotted_db_stats is not flushing received data (start the timer)\n");
         _ -> ok
     end,
-    folsom_metrics:notify({histogram, Name}, Value),
-    folsom_metrics:notify({units, Name}, {inc, 1}),
+    ok = folsom_metrics:notify({histogram, Name}, Value),
+    ok = folsom_metrics:notify({units, Name}, {inc, 1}),
     {noreply, NewState};
 
 handle_cast({notify, {counter, Name}, Value}, State = #state{active = true}) ->
-    folsom_metrics:notify({counter, Name}, {inc, Value}),
+    ok = folsom_metrics:notify({counter, Name}, {inc, Value}),
     {noreply, State}.
 
 
 handle_info(flush, State) ->
     consume_flush_msgs(),
     Now = os:timestamp(),
-    process_stats(Now, State),
+    _ = process_stats(Now, State),
     {noreply, State#state { last_write_time = Now }}.
 
 terminate(_Reason, State) ->
     %% Do the final stats report
-    process_stats(os:timestamp(), State),
+    _ = process_stats(os:timestamp(), State),
     [ok = file:close(F) || {{csv_file, _}, F} <- erlang:get()],
     ok.
 
@@ -358,9 +358,7 @@ update_sync_complete(Repaired, Sent, {PayloadSize, MetaSize}, S=#sync_stat{max=M
                      fp_size = FPSize + MetaSize}.
 
 init_sync_stat(undefined) ->
-    #sync_stat{last=0, min=0, max=0, sum=0, count=0, fp=0, tp=0, total=0, fp_size=0, tp_size=0};
-init_sync_stat(S) ->
-    S.
+    #sync_stat{last=0, min=0, max=0, sum=0, count=0, fp=0, tp=0, total=0, fp_size=0, tp_size=0}.
 
 get_sync_stat(undefined) ->
     get_sync_stat(init_sync_stat(undefined));
@@ -452,10 +450,10 @@ new_dir_name() ->
 % create_stat_folsom(Name, spiral) ->
 %     folsom_metrics:new_spiral({spiral, Name});
 create_stat_folsom({counter, Name}) ->
-    folsom_metrics:new_counter({counter, Name});
+    ok = folsom_metrics:new_counter({counter, Name});
 create_stat_folsom({histogram, Name}) ->
-    folsom_metrics:new_histogram({histogram, Name}, slide, ?FLUSH_INTERVAL),
-    folsom_metrics:new_counter({units, Name}).
+    ok = folsom_metrics:new_histogram({histogram, Name}, slide, ?FLUSH_INTERVAL),
+    ok = folsom_metrics:new_counter({units, Name}).
 
 %% @doc Create the stats directory and setups the output file handles for dumping
 %% periodic CSV of histogram results.
@@ -463,7 +461,7 @@ init_histogram_files(Stats) ->
     init_histogram_files(Stats, false).
 init_histogram_files(Stats, NewDir) ->
     TestDir = get_stats_dir(?CURRENT_DIR),
-    case (not filelib:is_dir(TestDir)) orelse NewDir of
+    _ = case (not filelib:is_dir(TestDir)) orelse NewDir of
         true -> create_new_dir();
         false -> ok
     end,

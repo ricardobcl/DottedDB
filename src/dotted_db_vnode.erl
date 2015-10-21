@@ -70,7 +70,9 @@
         % syncs stats
         syncs       :: [{id(), integer(), integer(), os:timestamp(), os:timestamp()}],
         % what mode the vnode is on
-        mode        :: normal | recovering
+        mode        :: normal | recovering,
+        % interval time between reports on this vnode
+        report_interval :: non_neg_integer()
     }).
 
 -type state() :: #state{}.
@@ -196,7 +198,7 @@ init([Index]) ->
                 {S, NodeId2,NodeClock, KeyLog, Replicated, NonStrippedKeys}
         end,
     % create an ETS to store keys written and deleted in this node (for stats)
-    create_ets_all_keys(NodeId3),
+    ok = create_ets_all_keys(NodeId3),
     % schedule a periodic reporting message (wait 2 seconds initially)
     schedule_report(2000),
     % schedule a periodic strip of local keys
@@ -216,7 +218,8 @@ init([Index]) ->
         updates_mem             = 0,
         stats                   = true,
         syncs                   = initialize_syncs(Index),
-        mode                    = normal
+        mode                    = normal,
+        report_interval         = ?REPORT_TICK_INTERVAL
         }
     }.
 
@@ -512,7 +515,7 @@ handle_command({restart, ReqID}, _Sender, State=#state{mode=normal}) ->
     NewReplicated = vv:reset_with_same_ids(State#state.replicated),
     CurrentPeers = dotted_db_utils:peers(State#state.index),
     true = ets:delete(get_ets_id(OldVnodeID)),
-    create_ets_all_keys(NewVnodeID),
+    ok = create_ets_all_keys(NewVnodeID),
     {ok, Storage1} = dotted_db_storage:drop(State#state.storage),
     ok = dotted_db_storage:close(Storage1),
     % open the storage backend for the key-values of this vnode
@@ -806,7 +809,7 @@ handle_handoff_command(Cmd, Sender, State) ->
 handoff_starting(TargetNode, State) ->
     lager:info("HAND_START: {~p, ~p} to ~p",[State#state.index, node(), TargetNode]),
     %% save the vnode state, if not empty
-    case State#state.clock =:= bvv:new() of
+    ok = case State#state.clock =:= bvv:new() of
         true -> ok;
         false ->
             Key = {?DEFAULT_BUCKET, {?VNODE_STATE_KEY, State#state.index}},
@@ -1068,11 +1071,11 @@ schedule_strip_keys(Interval) ->
 
 -spec maybe_tick(state()) -> state().
 maybe_tick(State=#state{stats=false}) ->
-    schedule_report(?REPORT_TICK_INTERVAL),
+    schedule_report(State#state.report_interval),
     State;
 maybe_tick(State=#state{stats=true}) ->
     {_, NextState} = report(State),
-    schedule_report(?REPORT_TICK_INTERVAL),
+    schedule_report(State#state.report_interval),
     NextState.
 
 -spec schedule_report(non_neg_integer()) -> ok.
@@ -1189,7 +1192,7 @@ fill_strip_save_kvs(Objects, RemoteClock, State) ->
 
 
 fill_strip_save_kvs([], _, State, {NSK, StrippedObjects}, _ETS) ->
-    dotted_db_storage:write_batch(State#state.storage, StrippedObjects),
+    ok = dotted_db_storage:write_batch(State#state.storage, StrippedObjects),
     NSK;
 fill_strip_save_kvs([{Key={_,_}, DCC} | Objects], RemoteClock, State, {NSK, StrippedObjects}, ETS) ->
     % fill the DCC with the sending clock
@@ -1296,13 +1299,14 @@ is_replicated_vv_up_to_date(State) ->
 new_vnode_id(Index) ->
     % generate a new vnode ID for now
     <<A:32, B:32, C:32>> = crypto:rand_bytes(12),
-    random:seed({A,B,C}),
+    _ = random:seed({A,B,C}),
     % get a random index withing the length of the list
     {Index, random:uniform(999999999999)}.
 
 create_ets_all_keys(NewVnodeID) ->
-    ((ets:info(get_ets_id(NewVnodeID)) /= undefined) orelse
-        ets:new(get_ets_id(NewVnodeID), [named_table, public, set, {write_concurrency, false}])).
+    _ = ((ets:info(get_ets_id(NewVnodeID)) /= undefined) orelse
+        ets:new(get_ets_id(NewVnodeID), [named_table, public, set, {write_concurrency, false}])),
+    ok.
 
 sync_merge_clocks(RemoteNodeID, RemoteClockBase, State) ->
     % get current peers node ids from replicated

@@ -25,7 +25,7 @@
 %% @doc open a storage, and by default use levelDB as backend.
 -spec open(list()) -> {ok, storage()} | {error, any()}.
 open(Name) ->
-    open(Name, [{backend, rkvs_ets}]).
+    open(Name, [{backend, ets}]).
 
 %% @doc open a storage, and pass options to the backend.
 -spec open(list(), list()) -> {ok, storage()} | {error, any()}.
@@ -132,7 +132,7 @@ drop(Engine, 0, LastError) ->
     % os:cmd("rm -rf " ++ Engine#engine.name),
     {error, LastError, Engine};
 drop(Engine, RetriesLeft, _) ->
-    close(Engine),
+    ok = close(Engine),
     % Engine2 = Engine#engine{options=[{db_opts,{create_if_missing, false}}]},
     case rkvs:destroy(Engine) of
         ok ->

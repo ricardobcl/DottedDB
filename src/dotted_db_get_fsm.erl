@@ -95,7 +95,7 @@ waiting({ok, ReqID, IndexNode, Response}, State=#state{
     % test if we have enough responses to respond to the client
     case length(Replies2) >= Min of
         true -> % we already have enough responses to acknowledge back to the client
-            create_client_reply(From, ReqID, Replies2, ReturnValue),
+            _ = create_client_reply(From, ReqID, Replies2, ReturnValue),
             case length(Replies2) >= Max of
                 true -> % we got the maximum number of replies sent
                     {next_state, finalize, NewState, 0};
