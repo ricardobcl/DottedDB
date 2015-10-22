@@ -51,13 +51,16 @@ handle_info({tcp_error, _, Reason}, State) ->
     {stop, Reason, State};
 handle_info(timeout, State) ->
     {stop, normal, State};
-handle_info(_Info, State) ->
-    {stop, normal, State}.
+handle_info(Info, State) ->
+    lager:warning("Unhandled Info: ~p", [Info]),
+    {noreply, State}.
 
-handle_call(_Request, _From, State) ->
+handle_call(Request, _From, State) ->
+    lager:warning("Unhandled Request: ~p", [Request]),
     {reply, ok, State}.
 
-handle_cast(_Msg, State) ->
+handle_cast(Msg, State) ->
+    lager:warning("Unhandled Message: ~p", [Msg]),
     {noreply, State}.
 
 terminate(_Reason, _State) ->
@@ -126,10 +129,12 @@ commands(D=[<<"DELETE">>, Bucket, Key], S) ->
     lager:debug("DELETE Res:~p",[Response]),
     send(S, Response);
 
-commands(D=[<<"OPTIONS">>, Sync, ReplicationFailure, NodeFailure], S) ->
+commands(D=[<<"OPTIONS">>, Sync, Strip, ReplicationFailure, NodeFailure], S) ->
     lager:info("OPTIONS Msg:~p",[D]),
     %% set new sync interval
     dotted_db_sync_manager:set_sync_interval(Sync),
+    %% set new strip interval
+    dotted_db:set_strip_interval2(Strip),
     %% set new replication message failure rate 0 <= rate <= 1
     State1 = S#state{options=[{?REPLICATION_FAIL_RATIO, ReplicationFailure}]},
     %% set new kill node rate
