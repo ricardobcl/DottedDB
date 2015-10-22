@@ -46,7 +46,6 @@ start_link(Stats) ->
 
 %% @doc Dynamically adds a list of stats {Type, Name}
 add_stats(NewStats) ->
-    ?PRINT(NewStats),
     gen_server:call(?MODULE, {add_stats, NewStats}).
 
 notify(Name, 0.0) -> notify(Name, 0);
@@ -106,8 +105,6 @@ handle_call(stop, _From, State) ->
                                 active = false}};
 
 handle_call({add_stats, NewStats}, _From, State = #state{stats = CurrentStats}) ->
-    ?PRINT("add_stats"),
-    ?PRINT(NewStats),
     %% Create the stats directory and setups the output file handles for dumping
     %% periodic CSV of histogram results.
     _ = init_histogram_files(NewStats),
@@ -272,7 +269,6 @@ init_histogram_files(Stats, NewDir) ->
         true -> create_new_dir();
         false -> ok
     end,
-    ?PRINT(Stats),
     %% Setup output file handles for dumping periodic CSV of histogram results.
     [erlang:put({csv_file, Name}, histogram_csv_file(Name,TestDir)) || {histogram, Name} <- Stats].
 
