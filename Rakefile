@@ -131,7 +131,7 @@ task :stop do
 end
 
 desc "restart all dotted_db nodes"
-task :restart => [:stop, :compile, :delete_storage, :clean_errors, :start]
+task :restart => [:stop, :compile, :delete_storage, :clean_errors, :start, :errors, :attach]
 
 desc "restart all dotted_db nodes"
 task :restart_with_storage => [:stop, :compile, :start]
