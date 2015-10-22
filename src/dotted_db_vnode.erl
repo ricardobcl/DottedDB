@@ -641,7 +641,7 @@ handle_command(get_vnode_state, _Sender, State) ->
 handle_command({set_strip_interval, NewStripInterval}, _Sender, State) ->
     OldStripInterval = State#state.buffer_strip_interval,
     lager:info("Strip Interval => from: ~p \t to: ~p",[OldStripInterval,NewStripInterval]),
-    {reply, {ok, OldStripInterval}, State#state{buffer_strip_interval=NewStripInterval}};
+    {noreply, State#state{buffer_strip_interval=NewStripInterval}};
 
 handle_command({get_vnode_id, RemoteID}, _Sender, State) ->
     RemoteCounter = vv:get(RemoteID, State#state.replicated),
