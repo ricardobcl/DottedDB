@@ -638,6 +638,11 @@ handle_command(ping, _Sender, State) ->
 handle_command(get_vnode_state, _Sender, State) ->
     {reply, {pong, State}, State};
 
+handle_command({set_strip_interval, NewStripInterval}, _Sender, State) ->
+    OldStripInterval = State#state.buffer_strip_interval,
+    lager:info("Strip Interval => from: ~p \t to: ~p",[OldStripInterval,NewStripInterval]),
+    {reply, {ok, OldStripInterval}, State#state{buffer_strip_interval=NewStripInterval}};
+
 handle_command({get_vnode_id, RemoteID}, _Sender, State) ->
     RemoteCounter = vv:get(RemoteID, State#state.replicated),
     {reply, {get_vnode_id, {State#state.index, node()}, State#state.id, RemoteCounter}, State};

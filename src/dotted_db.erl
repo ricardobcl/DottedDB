@@ -7,6 +7,9 @@
          ping/0,
          set_sync_interval/1,
          set_sync_interval/2,
+         set_strip_interval/1,
+         set_strip_interval/2,
+         set_strip_interval2/1,
          set_kill_node_rate/1,
          set_kill_node_rate/2,
          vstate/0,
@@ -71,6 +74,34 @@ set_sync_interval(SyncInterval, {?MODULE, TargetNode}) ->
         % this is not the target node
         _ ->
             proc_lib:spawn_link(TargetNode, dotted_db_sync_manager, set_sync_interval, [SyncInterval])
+    end.
+
+%% @doc Set the rate at which nodes sync with each other in milliseconds.
+set_strip_interval(StripInterval) ->
+    {ok, LocalNode} = new_client(),
+    set_strip_interval(StripInterval, LocalNode).
+
+set_strip_interval(StripInterval, {?MODULE, TargetNode}) ->
+    case node() of
+        % if this node is already the target node
+        TargetNode ->
+            set_strip_interval2(StripInterval);
+        % this is not the target node
+        _ ->
+            proc_lib:spawn_link(TargetNode, dotted_db, set_strip_interval2, [StripInterval])
+    end.
+
+set_strip_interval2(StripInterval) ->
+    case dotted_db_utils:vnodes_from_node(node()) of
+        [] ->
+            lager:warning("No vnodes to change strip interval, on node ~p", [node()]),
+            error;
+        Vnodes ->
+             riak_core_vnode_master:command(
+                        Vnodes,
+                        {set_strip_interval, StripInterval},
+                        {raw, undefined, self()},
+                        dotted_db_vnode_master)
     end.
 
 %% @doc Set the rate at which nodes fail (reset) in milliseconds.
