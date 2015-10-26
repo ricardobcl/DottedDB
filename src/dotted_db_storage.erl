@@ -19,6 +19,7 @@
          ]).
 
 -type storage() :: #engine{}.
+-type backend() :: bitcask | ets | leveldb.
 
 -export_type([storage/0]).
 
@@ -26,14 +27,14 @@
 %% @doc open a storage, and by default use ETS as backend.
 -spec open(list()) -> {ok, storage()} | {error, any()}.
 open(Name) ->
-    open(Name, [{backend, ets}], []).
+    open(Name, {backend, ets}, []).
 
--spec open(list(), {backend, atom()}) -> {ok, storage()} | {error, any()}.
+-spec open(list(), {backend, backend()}) -> {ok, storage()} | {error, any()}.
 open(Name, Backend) ->
     open(Name, Backend, []).
 
 %% @doc open a storage, and pass options to the backend.
--spec open(list(), {backend, atom()}, list()) -> {ok, storage()} | {error, any()}.
+-spec open(list(), {backend, backend()}, list()) -> {ok, storage()} | {error, any()}.
 open(Name, {backend, ets}, Options) ->
     Options2 = [{value_encoding, term}|Options],
     rkvs:open(Name, [{backend, rkvs_ets}|Options2]);
