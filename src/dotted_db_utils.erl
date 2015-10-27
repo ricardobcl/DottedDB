@@ -15,8 +15,15 @@ primary_node(Key) ->
 
 -spec replica_nodes(bkey()) -> [index_node()].
 replica_nodes(Key) ->
-    DocIdx = riak_core_util:chash_key(Key),
-    [IndexNode || {IndexNode, _Type} <- riak_core_apl:get_primary_apl(DocIdx, ?REPLICATION_FACTOR, dotted_db)].
+    case ets:lookup(?ETS_CACHE_REPLICA_NODES, Key) of
+        []  -> % we still haven't cached this key replica nodes
+            DocIdx = riak_core_util:chash_key(Key),
+            IndexNodes = [IndexNode || {IndexNode, _Type} <- riak_core_apl:get_primary_apl(DocIdx, ?REPLICATION_FACTOR, dotted_db)],
+            true = ets:insert(?ETS_CACHE_REPLICA_NODES, {Key, IndexNodes}),
+            IndexNodes;
+        [{_,IndexNodes}] ->
+            IndexNodes
+    end.
 
 -spec replica_nodes_indices(bkey()) -> [index()].
 replica_nodes_indices(Key) ->

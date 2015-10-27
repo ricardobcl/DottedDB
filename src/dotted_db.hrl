@@ -6,7 +6,7 @@
 -define(REPLICATION_FACTOR, 3).
 % -define(R, 2).
 % -define(W, 2).
--define(DEFAULT_BUCKET, <<"default_bucket">>).
+-define(DEFAULT_BUCKET, <<"b">>).
 -define(DELETE_OP, delete_op).
 -define(WRITE_OP, write_op).
 
@@ -34,6 +34,7 @@
 -define(STATS_FLUSH_INTERVAL, 5). % (sec) interval between flushing data to disk
 -define(DEFAULT_DO_STATS, true). % bool that says if a vnode should collect and report stats
 
+-define(ETS_CACHE_REPLICA_NODES, ets_cache_replica_nodes).
 -define(OPT_TIMEOUT, opt_timeout).
 
 -type bucket()     :: term().

@@ -5,7 +5,7 @@
 %% Application callbacks
 -export([start/2, stop/1]).
 
--define(INTERVAL, 1000).
+-include("dotted_db.hrl").
 
 %% ===================================================================
 %% Application callbacks
@@ -17,12 +17,16 @@ start(_StartType, _StartArgs) ->
         {ok, Pid} ->
 
             ok = riak_core:register([{vnode_module, dotted_db_vnode}]),
-
             ok = riak_core_ring_events:add_guarded_handler(dotted_db_ring_event_handler, []),
             ok = riak_core_node_watcher_events:add_guarded_handler(dotted_db_node_event_handler, []),
             ok = riak_core_node_watcher:service_up(dotted_db, self()),
 
+            % cache the replica nodes for specific keys
+            _ = ((ets:info(?ETS_CACHE_REPLICA_NODES) =:= undefined) andalso
+                    ets:new(?ETS_CACHE_REPLICA_NODES, 
+                        [named_table, public, set, {read_concurrency, true}, {write_concurrency, false}])),
 
+            % start listening socket for API msgpack messages
             Port = case app_helper:get_env(dotted_db, protocol_port) of
                 N when is_integer(N)    -> N;
                 _                       -> 0
@@ -30,6 +34,7 @@ start(_StartType, _StartArgs) ->
             {ok, _} = ranch:start_listener(the_socket, 10,
                             ranch_tcp, [{port, Port}], dotted_db_socket, []),
 
+            % add several stats to track and save in csv files
             dotted_db_stats:add_stats([
                 % size (bytes) of the node clock
                 {histogram, bvv_size},
