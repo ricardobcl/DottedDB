@@ -11,8 +11,7 @@ make_request_id() ->
 -spec primary_node(bkey()) -> index_node().
 primary_node(Key) ->
     DocIdx = riak_core_util:chash_key(Key),
-    {IndexNode, _Type}  = riak_core_apl:first_up(DocIdx, dotted_db),
-    IndexNode.
+    riak_core_apl:first_up(DocIdx, dotted_db).
 
 -spec replica_nodes(bkey()) -> [index_node()].
 replica_nodes(Key) ->
@@ -23,11 +22,6 @@ replica_nodes(Key) ->
 replica_nodes_indices(Key) ->
     [Index || {Index,_Node} <- replica_nodes(Key)].
 
-% -spec get_node_from_index(index()) -> index_node().
-% get_node_from_index(Index) ->
-%     {ok, Ring} = riak_core_ring_manager:get_my_ring(),
-%     Node = riak_core_ring:index_owner(Ring, Index),
-%     {Index,Node}.
 
 -spec random_index_node() -> [index_node()].
 random_index_node() ->
@@ -46,7 +40,7 @@ vnodes_from_node(TargetNode) ->
 %% @doc Returns the nodes that also replicate a subset of keys from some node "NodeIndex".
 %% We are assuming a consistent hashing ring, thus we return the N-1 before this node in the
 %% ring and the next N-1.
--spec peers(index()) -> [index()].
+-spec peers(index()) -> [index_node()].
 peers(Index) ->
     peers(Index, ?REPLICATION_FACTOR).
 -spec peers(index(), pos_integer()) -> [index_node()].
