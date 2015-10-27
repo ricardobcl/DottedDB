@@ -11,7 +11,7 @@
 -define(WRITE_OP, write_op).
 
 %% Options for syncs.
--define(DEFAULT_SYNC_INTERVAL, 100).
+-define(DEFAULT_SYNC_INTERVAL, 300).
 -define(ONE_WAY, one_way_sync).
 -define(TWO_WAY, two_way_sync).
 -define(DEFAULT_NODE_KILL_RATE, 0). % kill a vnode every x milliseconds; 0 = disabled
@@ -32,6 +32,7 @@
 -define(MAX_KEYS_SENT_RECOVERING, 1000). % max sent at a time to a restarting node.
 
 -define(STATS_FLUSH_INTERVAL, 5). % (sec) interval between flushing data to disk
+-define(DEFAULT_DO_STATS, true). % bool that says if a vnode should collect and report stats
 
 -define(OPT_TIMEOUT, opt_timeout).
 

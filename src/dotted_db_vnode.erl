@@ -44,6 +44,8 @@
 -record(state, {
         % node id used for in logical clocks
         id          :: vnode_id(),
+        % the atom representing the vnode id
+        atom_id     :: atom(),
         % index on the consistent hashing ring
         index       :: index(),
         % node logical clock
@@ -54,9 +56,9 @@
         replicated  :: vv(),
         % log for keys that this node coordinated a write (eventually older keys are safely pruned)
         keylog      :: keylog(),
-        % the left list is a set of deleted keys, not yet stripped;
-        % the right side is a list of (vnode, map), where the map is between dots and keys not yet completely stripped
-        non_stripped_keys :: {[key()], [{id(), dict:dict()}]},
+        % the left list of pairs of deleted keys not yet stripped, and their causal context (version vector);
+        % the right side is a list of (vnode, map), where the map is between dots and keys not yet completely stripped (and their VV also)
+        non_stripped_keys :: {[{key(),vv()}], [{id(), dict:dict()}]},
         % interval in which the vnode tries to strip the non-stripped-keys
         buffer_strip_interval :: non_neg_integer(),
         % temporary list of nodes recovering from failure and a list of keys to send
@@ -198,7 +200,7 @@ init([Index]) ->
                 {S, NodeId2,NodeClock, KeyLog, Replicated, NonStrippedKeys}
         end,
     % create an ETS to store keys written and deleted in this node (for stats)
-    ok = create_ets_all_keys(NodeId3),
+    AtomID = create_ets_all_keys(NodeId3),
     % schedule a periodic reporting message (wait 2 seconds initially)
     schedule_report(2000),
     % schedule a periodic strip of local keys
@@ -206,6 +208,7 @@ init([Index]) ->
     {ok, #state{
         % for now, lets use the index in the consistent hash as the vnode ID
         id                      = NodeId3,
+        atom_id                 = AtomID,
         index                   = Index,
         clock                   = NodeClock2,
         replicated              = Replicated2,
@@ -216,7 +219,7 @@ init([Index]) ->
         storage                 = Storage,
         dets                    = Dets,
         updates_mem             = 0,
-        stats                   = true,
+        stats                   = application:get_env(dotted_db, do_stats, ?DEFAULT_DO_STATS),
         syncs                   = initialize_syncs(Index),
         mode                    = normal,
         report_interval         = ?REPORT_TICK_INTERVAL
@@ -224,36 +227,12 @@ init([Index]) ->
     }.
 
 
-
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%% READING
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-handle_command({read, ReqID, Key}, _Sender, State) ->
-    Response =
-        case dotted_db_storage:get(State#state.storage, Key) of
-            {error, not_found} ->
-                % there is no key K in this node
-                % create an empty "object" and fill its causality with the node clock
-                % this is needed to ensure that deletes "win" over old writes at the coordinator
-                {ok, fill_clock(Key, dcc:new(), State#state.clock)};
-            {error, Error} ->
-                % some unexpected error
-                lager:error("Error reading a key from storage (command read): ~p", [Error]),
-                % return the error
-                {error, Error};
-            DCC ->
-                % get and fill the causal history of the local object
-                {ok, fill_clock(Key, DCC, State#state.clock)}
-        end,
-    % Optionally collect stats
-    case State#state.stats of
-        true -> ok;
-        false -> ok
-    end,
-    IndexNode = {State#state.index, node()},
-    {reply, {ok, ReqID, IndexNode, Response}, State};
-
+handle_command(Cmd={read, _ReqID, _Key}, _Sender, State) ->
+    handle_read(Cmd, State);
 
 handle_command({repair, BKey, NewDCC}, Sender, State) ->
     {reply, {ok, dummy_req_id}, State2} =
@@ -261,246 +240,47 @@ handle_command({repair, BKey, NewDCC}, Sender, State) ->
     {noreply, State2};
 
 
-
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%% WRITING
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-handle_command({write, ReqID, Operation, Key, Value, Context}, _Sender, State) ->
+handle_command(Cmd={write, _ReqID, _Operation, _Key, _Value, _Context}, _Sender, State) ->
+    % % debug
+    % RN = dotted_db_utils:replica_nodes(Key),
+    % This = {State#state.index, node()},
+    % case lists:member(This, RN) of
+    %     true   ->
+    %         ok;
+    %     false ->
+    %         lager:info("WRONG NODE!!!! IxNd: ~p work vnode for key ~p in ~p", [This, Key, RN])
+    % end,
+    handle_write(Cmd, State);
 
-    % debug
-    RN = dotted_db_utils:replica_nodes(Key),
-    This = {State#state.index, node()},
-    case lists:member(This, RN) of
-        true   ->
-            ok;
-        false ->
-            lager:info("WRONG NODE!!!! IxNd: ~p work vnode for key ~p in ~p", [This, Key, RN])
-    end,
-
-    % get and fill the causal history of the local key
-    DiskDCC = guaranteed_get(Key, State),
-    % discard obsolete values w.r.t the causal context
-    DiscardDCC = dcc:discard(DiskDCC, Context),
-    % generate a new dot for this write/delete and add it to the node clock
-    {Dot, NodeClock} = bvv:event(State#state.clock, State#state.id),
-    % test if this is a delete; if not, add dot-value to the DCC container
-    NewDCC =
-        case Operation of
-            ?DELETE_OP  -> % DELETE
-                % DiscardDCC;
-                dcc:add(DiscardDCC, {State#state.id, Dot}, ?DELETE_OP);
-            ?WRITE_OP   -> % PUT
-                dcc:add(DiscardDCC, {State#state.id, Dot}, Value)
-        end,
-    % save the new k\v and remove unnecessary causal information
-    save_kv(Key, NewDCC, State#state{clock=NodeClock}),
-    % append the key to the tail of the key log
-    {Base, Keys} = State#state.keylog,
-    KeyLog = {Base, Keys ++ [Key]},
-    % Optionally collect stats
-    case State#state.stats of
-        true ->
-            % MetaF = byte_size(term_to_binary(dcc:context(NewDCC))),
-            % MetaS = byte_size(term_to_binary(dcc:context(StrippedDCC))),
-            % CCF = length(dcc:context(NewDCC)),
-            % CCS = length(dcc:context(StrippedDCC)),
-            % dotted_db_stats:update_key_meta(State#state.index, 1, MetaF, MetaS, CCF, CCS),
-
-            ok;
-        false -> ok
-    end,
-    % return the updated node state
-    {reply, {ok, ReqID, NewDCC},
-        State#state{clock = NodeClock, keylog = KeyLog}};
-
-
-handle_command({replicate, ReqID, Key, NewDCC}, _Sender, State) ->
-
-% debug
-    RN = dotted_db_utils:replica_nodes(Key),
-    This = {State#state.index, node()},
-    case lists:member(This, RN) of
-        true   ->
-            ok;
-        false ->
-            lager:info("WRONG NODE!!! (2)IxNd: ~p work vnode for key ~p in ~p", [This, Key, RN])
-    end,
-
-    NodeClock = dcc:add(State#state.clock, NewDCC),
-    % get and fill the causal history of the local key
-    DiskDCC = guaranteed_get(Key, State),
-    % synchronize both objects
-    FinalDCC = dcc:sync(NewDCC, DiskDCC),
-    % test if the FinalDCC has newer information
-    NSK = case FinalDCC == DiskDCC of
-        true ->
-            lager:debug("Replicated object is ignored (already seen)"),
-            State#state.non_stripped_keys;
-        false ->
-            % save the new key DCC, while stripping the unnecessary causality
-            NEntries = save_kv(Key, FinalDCC, State#state{clock=NodeClock}),
-            case NEntries =/= 0 of
-                true ->
-                    add_keys_to_strip_schedule_objects([{Key,NewDCC}], {dummy_node_index, dummy_node_id}, State#state.non_stripped_keys);
-                false ->
-                    State#state.non_stripped_keys
-            end
-    end,
-    % Optionally collect stats
-    case State#state.stats andalso FinalDCC =/= DiskDCC of
-        true ->
-            % StrippedDCC2 = dcc:strip(FinalDCC, NodeClock),
-            % MetaF = byte_size(term_to_binary(dcc:context(FinalDCC))),
-            % MetaS = byte_size(term_to_binary(dcc:context(StrippedDCC2))),
-            % CCF = length(dcc:context(FinalDCC)),
-            % CCS = length(dcc:context(StrippedDCC2)),
-            % dotted_db_stats:update_key_meta(State#state.index, 1, MetaF, MetaS, CCF, CCS),
-            ok;
-        false -> ok
-    end,
-    % return the updated node state
-    {reply, {ok, ReqID}, State#state{clock = NodeClock, non_stripped_keys = NSK}};
-
-
+handle_command(Cmd={replicate, _ReqID, _Key, _NewDCC}, _Sender, State) ->
+    % % debug
+    %  RN = dotted_db_utils:replica_nodes(Key),
+    %  This = {State#state.index, node()},
+    %  case lists:member(This, RN) of
+    %      true   ->
+    %          ok;
+    %      false ->
+    %          lager:info("WRONG NODE!!! (2)IxNd: ~p work vnode for key ~p in ~p", [This, Key, RN])
+    %  end,
+    handle_replicate(Cmd, State);
 
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%% SYNCHRONIZING
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-handle_command({sync_start, ReqID}, _Sender, State=#state{mode=recovering}) ->
-    {reply, {cancel, ReqID, recovering}, State};
-handle_command({sync_start, ReqID}, _Sender, State=#state{mode=normal}) ->
-    % choose a peer at random
-    NodeB = {IndexB, _} = dotted_db_utils:random_from_list(dotted_db_utils:peers(State#state.index)),
-    % get the NodeB entry from this node clock
-    EntryB = bvv:get(IndexB, State#state.clock),
-    % % update this node sync stats
-    % NewLastAttempt = os:timestamp(),
-    % Fun = fun ({PI, ToCounter, FromCounter, LastAttempt, LastExchange}) ->
-    %         case PI =:= IndexB of
-    %             true -> {PI, ToCounter + 1, FromCounter, NewLastAttempt, LastExchange};
-    %             false -> {PI, ToCounter, FromCounter, LastAttempt, LastExchange}
-    %         end
-    %       end,
-    % Syncs = lists:map(Fun, State#state.syncs),
-    % send a sync message to that node
-    {reply, {ok, ReqID, State#state.id, NodeB, EntryB}, State};
+handle_command(Cmd={sync_start, _ReqID}, _Sender, State) ->
+    handle_sync_start(Cmd, State);
 
+handle_command(Cmd={sync_missing, _ReqID, _RemoteID, _LocalEntryInRemoteClock}, _Sender, State) ->
+    handle_sync_missing(Cmd, State);
 
-handle_command({sync_missing, ReqID, _, _}, _Sender, State=#state{mode=recovering}) ->
-    {reply, {cancel, ReqID, recovering}, State};
-handle_command({sync_missing, ReqID, RemoteID={_,_}, LocalEntryInRemoteClock}, _Sender, State=#state{mode=normal}) ->
-    {RemoteIndex,_} = RemoteID,
-    % get the all the dots (only the counters) from the local node clock, with id equal to the local node
-    LocalDots = bvv:values(bvv:get(State#state.id, State#state.clock)),
-    % get the all the dots (only the counters) from the asking node clock, with id equal to the local node
-    RemoteDots =  bvv:values(LocalEntryInRemoteClock),
-    % calculate what dots are present locally that the asking node does not have
-    MisssingDots = LocalDots -- RemoteDots,
-    {KBase, KeyList} = State#state.keylog,
-    % get the keys corresponding to the missing dots,
-    MissingKeys = [lists:nth(MDot-KBase, KeyList) || MDot <- MisssingDots, MDot > KBase],
-    % filter the keys that the asking node does not replicate
-    RelevantMissingKeys = [Key || Key <- MissingKeys,
-                            lists:member(RemoteIndex, dotted_db_utils:replica_nodes_indices(Key))],
-    % get each key's respective DCC
-    RelevantMissingObjects = [{Key, guaranteed_get(Key, State)} || Key <- RelevantMissingKeys],
-    % strip any unnecessary causal information to save network bandwidth
-    StrippedObjects = [{Key, dcc:strip(DCC, State#state.clock)} || {Key,DCC} <- RelevantMissingObjects],
-    % Optionally collect stats
-    Syncs = case State#state.stats andalso MissingKeys > 0 of
-        true ->
-            case length(StrippedObjects) > 0 of
-                true ->
-                    Ratio_Relevant_Keys = round(100*length(RelevantMissingKeys)/max(1,length(MissingKeys))),
-                    dotted_db_stats:notify({histogram, sync_relevant_ratio}, Ratio_Relevant_Keys),
-                    
-                    Ctx_Sent_Strip = [dcc:context(DCC) || {_Key, DCC} <- StrippedObjects],
-                    Sum_Ctx_Sent_Strip = lists:sum([length(DCC) || DCC <- Ctx_Sent_Strip]),
-                    Ratio_Sent_Strip = Sum_Ctx_Sent_Strip/max(1,length(StrippedObjects)),
-                    dotted_db_stats:notify({histogram, sync_sent_dcc_strip}, Ratio_Sent_Strip),
-        
-                    Size_Meta_Sent = byte_size(term_to_binary(Ctx_Sent_Strip)),
-                    dotted_db_stats:notify({histogram, sync_metadata_size}, Size_Meta_Sent),
-        
-                    Payload_Sent_Strip = [{Key, dcc:values(DCC)} || {Key, DCC} <- StrippedObjects],
-                    Size_Payload_Sent = byte_size(term_to_binary(Payload_Sent_Strip)),
-                    dotted_db_stats:notify({histogram, sync_payload_size}, Size_Payload_Sent),
-
-                    dotted_db_stats:notify({histogram, sync_sent_missing}, length(StrippedObjects));
-                false -> ok
-            end,
-            % % update this node sync stats
-            % NewLastAttempt = os:timestamp(),
-            % Fun = fun ({PI, ToCounter, FromCounter, LastAttempt, LastExchange}) ->
-            %         case PI =:= RemoteID of
-            %             true -> {PI, ToCounter, FromCounter + 1, NewLastAttempt, LastExchange};
-            %             false -> {PI, ToCounter, FromCounter, LastAttempt, LastExchange}
-            %         end
-            %       end,
-            % lists:map(Fun, State#state.syncs);
-            State#state.syncs;
-        false -> State#state.syncs
-    end,
-    % send the final objects and the base (contiguous) dots of the node clock to the asking node
-    {reply, {   ok,
-                ReqID,
-                State#state.id,
-                bvv:base(State#state.clock),
-                bvv:get(RemoteID, State#state.clock), % Remote entry in this node's global clock
-                StrippedObjects},
-        State#state{syncs = Syncs}};
-
-handle_command({sync_repair, ReqID, _, _, _}, _Sender, State=#state{mode=recovering}) ->
-    {reply, {cancel, ReqID, recovering}, State};
-handle_command({sync_repair, ReqID, RemoteNodeID={_,_}, RemoteClockBase, MissingObjects}, _Sender, State=#state{mode=normal}) ->
-    NodeClock = sync_merge_clocks(RemoteNodeID, RemoteClockBase, State),
-    % get the local objects corresponding to the received objects and fill the
-    % causal history for all of them
-    FilledObjects =
-        [{ Key, fill_clock(Key, DCC, RemoteClockBase), guaranteed_get(Key, State) }
-         || {Key,DCC} <- MissingObjects],
-    % synchronize / merge the remote and local objects
-    SyncedObjects = [{ Key, dcc:sync(Remote, Local), Local } || {Key, Remote, Local} <- FilledObjects],
-    % filter the objects that are not missing after all
-    RealMissingObjects = [{ Key, Synced } || {Key, Synced, Local} <- SyncedObjects, Synced =/= Local],
-    % save the synced objects and strip their causal history
-    RealMissingObjects2 = [{Key, DCC, save_kv(Key, DCC, State#state{clock=NodeClock})} || {Key, DCC} <- RealMissingObjects],
-    % filter the keys that were totally stripped
-    NonStrippedObjects = [{Key, DCC} || {Key, DCC, N} <- RealMissingObjects2, N =/= 0],
-    % schedule a later strip attempt for non-stripped synced keys
-    NSK = add_keys_to_strip_schedule_objects(NonStrippedObjects, RemoteNodeID, State#state.non_stripped_keys),
-    % update the replicated clock to reflect what the asking node has about the local node
-    {Base,_} = bvv:get(State#state.id, RemoteClockBase),
-    Replicated = vv:add(State#state.replicated, {RemoteNodeID, Base}),
-    % Garbage Collect keys from the KeyLog and delete keys with no causal context
-    State2 = gc_keylog(State#state{clock=NodeClock, non_stripped_keys=NSK, replicated=Replicated}),
-    % Optionally collect stats
-    Syncs = case State2#state.stats of
-        true ->
-            Repaired = length(RealMissingObjects),
-            Sent = length(MissingObjects),
-            Hit_Ratio = 100*Repaired/max(1, Sent),
-            Hit_Ratio =/= 0.0 andalso Sent =/= 0 andalso
-                dotted_db_stats:notify({histogram, sync_hit_ratio}, Hit_Ratio),
-
-            % % update this node sync stats
-            % NewLastExchange = os:timestamp(),
-            % Fun = fun ({PI, ToCounter, FromCounter, LastAttempt, LastExchange}) ->
-            %         case PI =:= RemoteNodeID of
-            %             true -> {PI, ToCounter, FromCounter, LastAttempt, NewLastExchange};
-            %             false -> {PI, ToCounter, FromCounter, LastAttempt, LastExchange}
-            %         end
-            %       end,
-            % lists:map(Fun, State2#state.syncs);
-            State#state.syncs;
-        false ->
-            State2#state.syncs
-    end,
-    {reply, {ok, ReqID}, State2#state{syncs = Syncs}};
-
+handle_command(Cmd={sync_repair, _ReqID, _RemoteNodeID, _RemoteClockBase, _MissingObjects}, _Sender, State) ->
+    handle_sync_repair(Cmd, State);
 
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -508,128 +288,20 @@ handle_command({sync_repair, ReqID, RemoteNodeID={_,_}, RemoteClockBase, Missing
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 %% On the restarting node
-handle_command({restart, ReqID}, _Sender, State=#state{mode=recovering}) ->
-    {reply, {cancel, ReqID, recovering}, State};
-handle_command({restart, ReqID}, _Sender, State=#state{mode=normal}) ->
-    ThisVnode = {State#state.index, node()},
-    OldVnodeID = State#state.id,
-    {MyBase,0} = bvv:get(OldVnodeID, State#state.clock),
-    NewVnodeID = new_vnode_id(State#state.index),
-    NewReplicated = vv:reset_with_same_ids(State#state.replicated),
-    CurrentPeers = dotted_db_utils:peers(State#state.index),
-    true = delete_ets_all_keys(OldVnodeID),
-    ok = create_ets_all_keys(NewVnodeID),
-    {ok, Storage1} = dotted_db_storage:drop(State#state.storage),
-    ok = dotted_db_storage:close(Storage1),
-    % open the storage backend for the key-values of this vnode
-    {_, NewStorage} = open_storage(State#state.index),
-    ok = save_vnode_state(State#state.dets, {NewVnodeID, bvv:new(), {0,[]}, NewReplicated, []}),
-    {reply, {ok, ReqID, {ReqID, ThisVnode, OldVnodeID, NewVnodeID, MyBase}, CurrentPeers},
-        State#state{
-            id                  = NewVnodeID,
-            clock               = bvv:new(),
-            keylog              = {0,[]},
-            replicated          = NewReplicated,
-            non_stripped_keys   = {[],[]},
-            recover_keys        = [],
-            storage             = NewStorage,
-            syncs               = initialize_syncs(State#state.index),
-            updates_mem         = 0,
-            mode                = recovering}};
+handle_command(Cmd={restart, _ReqID}, _Sender, State) ->
+    handle_restart(Cmd, State);
 
 %% On the good nodes
-handle_command({inform_peers_restart, {ReqID, RestartingVnode, OldVnodeID, NewVnodeID, RemoteBase}}, _Sender, State) ->
-    % jump the base counter of the old id in the node clock, to make sure we "win"
-    % against all keys potentially not stripped yet because of that old id
-    NodeClock0 = bvv:store_entry(OldVnodeID, {RemoteBase+100000,0}, State#state.clock),
-    % add the new node id to the node clock
-    NewClock = bvv:add(NodeClock0, {NewVnodeID, 0}),
-    % remove the old node id from the replicated
-    NewReplicated0 = vv:delete_key(State#state.replicated, OldVnodeID),
-    % remove the new node id to the replicated
-    NewReplicated = vv:add(NewReplicated0, {NewVnodeID, 0}),
-    % add the new node id to the node clock
-    AllKeys = get_all_keys(State),
-    FunFilter = fun (Key) ->
-                    RN = dotted_db_utils:replica_nodes(Key),
-                    lists:member(RestartingVnode, RN)
-                end,
-    RelevantKeys = lists:filter(FunFilter, AllKeys),
-    {Now, Later} = lists:split(min(?MAX_KEYS_SENT_RECOVERING,length(RelevantKeys)), RelevantKeys),
-    lager:info("Restart transfer => Now: ~p Later: ~p",[length(Now), length(Later)]),
-    % get each key's respective DCC
-    RelevantMissingObjects = [{Key, guaranteed_get(Key, State)} || Key <- Now],
-    % strip any unnecessary causal information to save network bandwidth
-    StrippedObjects = [{Key, dcc:strip(DCC, NewClock)} || {Key,DCC} <- RelevantMissingObjects],
-    % save the rest of the keys for later (if there's any)
-    {LastBatch, RecoverKeys} = case Later of
-        [] -> {true, State#state.recover_keys};
-        _ -> {false, [{NewVnodeID, Later} | State#state.recover_keys]}
-    end,
-    {reply, { ok, stage1, ReqID, {
-                ReqID,
-                {State#state.index, node()},
-                State#state.id,
-                NewClock, %bvv:base(NewClock),
-                StrippedObjects,
-                LastBatch % is this the last batch?
-            }}, State#state{clock=NewClock, replicated=NewReplicated, recover_keys=RecoverKeys}};
+handle_command(Cmd={inform_peers_restart, {_ReqID, _RestartingVnode, _OldVnodeID, _NewVnodeID, _RemoteBase}}, _Sender, State) ->
+    handle_inform_peers_restart(Cmd, State);
 
 %% On the restarting node
-handle_command({recover_keys, {ReqID, RemoteVnode, RemoteVnodeId={_,_}, RemoteClock, Objects, _LastBatch=false}}, _Sender, State) ->
-    % save the objects and return the ones that were not totally filtered
-    NonStrippedObjects = fill_strip_save_kvs(Objects, RemoteClock, State),
-    % schedule a later strip attempt for non-stripped synced keys
-    NSK = add_keys_to_strip_schedule_objects(NonStrippedObjects, RemoteVnodeId, State#state.non_stripped_keys),
-    {reply, {ok, stage2, ReqID, RemoteVnode}, State#state{non_stripped_keys=NSK}};
+handle_command(Cmd={recover_keys, {_ReqID, _RemoteVnode, _RemoteVnodeId, _RemoteClock, _Objects, _LastBatch}}, _Sender, State) ->
+    handle_recover_keys(Cmd, State);
 
 %% On the good nodes
-handle_command({inform_peers_restart2, {ReqID, NewVnodeID}}, _Sender, State) ->
-    {LastBatch1, Objects, RecoverKeys1} =
-        case proplists:get_value(NewVnodeID, State#state.recover_keys) of
-            undefined ->
-                {true, [], State#state.recover_keys};
-            RelevantKeys ->
-                RK = proplists:delete(NewVnodeID, State#state.recover_keys),
-                {Now, Later} = lists:split(min(?MAX_KEYS_SENT_RECOVERING,length(RelevantKeys)), RelevantKeys),
-                % get each key's respective DCC
-                RelevantMissingObjects = [{Key, guaranteed_get(Key, State)} || Key <- Now],
-                % strip any unnecessary causal information to save network bandwidth
-                StrippedObjects = [{Key, dcc:strip(DCC, State#state.clock)} || {Key,DCC} <- RelevantMissingObjects],
-                % save the rest of the keys for later (if there's any)
-                {LastBatch, RecoverKeys} = case Later of
-                    [] -> {true, RK};
-                    _ -> {false, [{NewVnodeID, Later} | RK]}
-                end,
-                {LastBatch, StrippedObjects, RecoverKeys}
-        end,
-    {reply, { ok, stage3, ReqID, {
-                ReqID,
-                {State#state.index, node()},
-                State#state.id,
-                State#state.clock, %bvv:base(State#state.clock),
-                Objects,
-                LastBatch1 % is this the last batch?
-            }}, State#state{recover_keys=RecoverKeys1}};
-
-%% On the restarting node
-handle_command({recover_keys, {ReqID, RemoteVnode, RemoteNodeID={_,_}, RemoteClock, Objects, _LastBatch=true}}, _Sender, State) ->
-    % merge the remote clock with our own clock
-    NodeClock0 = bvv:merge(State#state.clock, RemoteClock),
-    % filter ids from non-peer nodes
-    PeerIndices = [State#state.index]++[Idx || {Idx,_} <- dotted_db_utils:peers(State#state.index)],
-    NodeClock = orddict:filter(fun({Index,_}, _) -> lists:member(Index, PeerIndices) end, NodeClock0),
-    % update the replicated clock to reflect what the asking node has about the local node
-    {Base,_} = bvv:get(State#state.id, RemoteClock),
-    Replicated = vv:add(State#state.replicated, {RemoteNodeID, Base}),
-    % save the objects and return the ones that were not totally filtered
-    NonStrippedObjects = fill_strip_save_kvs(Objects, RemoteClock, State#state{clock=NodeClock}),
-    % schedule a later strip attempt for non-stripped synced keys
-    NSK = add_keys_to_strip_schedule_objects(NonStrippedObjects, RemoteNodeID, State#state.non_stripped_keys),
-    % Garbage Collect keys from the KeyLog and delete keys with no causal context
-    State2 = gc_keylog(State#state{clock=NodeClock, non_stripped_keys=NSK, replicated=Replicated}),
-    {reply, {ok, stage4, ReqID, RemoteVnode}, State2#state{mode=normal}};
-
+handle_command(Cmd={inform_peers_restart2, {_ReqID, _NewVnodeID}}, _Sender, State) ->
+    handle_inform_peers_restart2(Cmd, State);
 
 %% Sample command: respond to a ping
 handle_command(ping, _Sender, State) ->
@@ -643,12 +315,17 @@ handle_command({set_strip_interval, NewStripInterval}, _Sender, State) ->
     lager:info("Strip Interval => from: ~p \t to: ~p",[OldStripInterval,NewStripInterval]),
     {noreply, State#state{buffer_strip_interval=NewStripInterval}};
 
+handle_command({set_stats, NewStats}, _Sender, State) ->
+    OldStats = State#state.stats,
+    lager:info("Vnode stats => from: ~p \t to: ~p",[OldStats, NewStats]),
+    {noreply, State#state{stats=NewStats}};
+
 handle_command({get_vnode_id, RemoteID}, _Sender, State) ->
     RemoteCounter = vv:get(RemoteID, State#state.replicated),
     {reply, {get_vnode_id, {State#state.index, node()}, State#state.id, RemoteCounter}, State};
 
 handle_command(Message, _Sender, State) ->
-    lager:info({unhandled_command, Message}),
+    lager:info("Unhandled Command ~p", [Message]),
     {noreply, State}.
 
 
@@ -657,21 +334,14 @@ handle_command(Message, _Sender, State) ->
 %%%===================================================================
 
 handle_coverage(vnode_state, _KeySpaces, {_, RefId, _}, State) ->
-    % lager:info("COVERAGE: IxNd: ~p   \tId: ~p",[{State#state.index, node()},State#state.id]),
-    {_,K} = State#state.keylog,
-    {Del,Wrt} = State#state.non_stripped_keys,
-    SizeNSK = byte_size(term_to_binary(State#state.non_stripped_keys)),
-    LengthNSK1 = length(Wrt),
-    LengthNSK2 = lists:sum([dict:size(Dict) || {_,Dict} <- Wrt]) + length(Del),
-    KL = {length(K), byte_size(term_to_binary(State#state.keylog))},
-    {reply, {RefId, {ok, vs, State#state{keylog = KL, non_stripped_keys={SizeNSK,LengthNSK1,LengthNSK2} }}}, State};
+    {reply, {RefId, {ok, vs, State}}, State};
 
 handle_coverage(actual_deleted_keys, _KeySpaces, {_, RefId, _}, State) ->
-    ADelKeys = get_actual_deleted_keys(State#state.id),
+    ADelKeys = get_actual_deleted_keys(State#state.atom_id),
     {reply, {RefId, {ok, adk, ADelKeys}}, State};
 
 handle_coverage(issued_deleted_keys, _KeySpaces, {_, RefId, _}, State) ->
-    IDelKeys = get_issued_deleted_keys(State#state.id),
+    IDelKeys = get_issued_deleted_keys(State#state.atom_id),
     Res = case length(IDelKeys) > 0 of
         true ->
             Key = hd(IDelKeys),
@@ -695,7 +365,7 @@ handle_coverage(issued_deleted_keys, _KeySpaces, {_, RefId, _}, State) ->
     {reply, {RefId, {ok, idk, IDelKeys, Res, ThisVnode}}, State};
 
 handle_coverage(written_keys, _KeySpaces, {_, RefId, _}, State) ->
-    WrtKeys = get_written_keys(State#state.id),
+    WrtKeys = get_written_keys(State#state.atom_id),
     Res = case length(WrtKeys) > 0 of
         true ->
             Key = hd(WrtKeys),
@@ -719,7 +389,7 @@ handle_coverage(written_keys, _KeySpaces, {_, RefId, _}, State) ->
     {reply, {RefId, {ok, wk, WrtKeys, Res, ThisVnode}}, State};
 
 handle_coverage(final_written_keys, _KeySpaces, {_, RefId, _}, State) ->
-    WrtKeys = get_final_written_keys(State#state.id),
+    WrtKeys = get_final_written_keys(State#state.atom_id),
     {reply, {RefId, {ok, fwk, WrtKeys}}, State};
 
 handle_coverage(Req, _KeySpaces, _Sender, State) ->
@@ -741,9 +411,13 @@ handle_info({undefined,{get_vnode_id, IndexNode={Index,_}, VnodeID={Index,_}, My
             {ok, State}
     end;
 %% Report Tick
-handle_info(report_tick, State) ->
-    State1 = maybe_tick(State),
-    {ok, State1};
+handle_info(report_tick, State=#state{stats=false}) ->
+    schedule_report(State#state.report_interval),
+    {ok, State};
+handle_info(report_tick, State=#state{stats=true}) ->
+    {_, NextState} = report(State),
+    schedule_report(State#state.report_interval),
+    {ok, NextState};
 %% Buffer Strip Tick
 handle_info(strip_keys, State=#state{mode=recovering}) ->
     % schedule the strip for keys that still have causal context at the moment
@@ -878,7 +552,7 @@ delete(State) ->
             lager:info("GOOD_DROP: {~p, ~p}",[State#state.index, node()]);
         false -> ok
     end,
-    true = delete_ets_all_keys(State#state.id),
+    true = delete_ets_all_keys(State#state.atom_id),
     {ok, State#state{storage=Storage1}}.
 
 handle_exit(_Pid, _Reason, State) ->
@@ -895,6 +569,350 @@ terminate(_Reason, State) ->
 %% Private
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%% READING
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+handle_read({read, ReqID, Key}, State) ->
+    Response =
+        case dotted_db_storage:get(State#state.storage, Key) of
+            {error, not_found} ->
+                % there is no key K in this node
+                % create an empty "object" and fill its causality with the node clock
+                % this is needed to ensure that deletes "win" over old writes at the coordinator
+                {ok, fill_clock(Key, dcc:new(), State#state.clock)};
+            {error, Error} ->
+                % some unexpected error
+                lager:error("Error reading a key from storage (command read): ~p", [Error]),
+                % return the error
+                {error, Error};
+            DCC ->
+                % get and fill the causal history of the local object
+                {ok, fill_clock(Key, DCC, State#state.clock)}
+        end,
+    % Optionally collect stats
+    case State#state.stats of
+        true -> ok;
+        false -> ok
+    end,
+    IndexNode = {State#state.index, node()},
+    {reply, {ok, ReqID, IndexNode, Response}, State}.
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%% WRITING
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+handle_write({write, ReqID, Operation, Key, Value, Context}, State) ->
+    % get and fill the causal history of the local key
+    DiskDCC = guaranteed_get(Key, State),
+    % discard obsolete values w.r.t the causal context
+    DiscardDCC = dcc:discard(DiskDCC, Context),
+    % generate a new dot for this write/delete and add it to the node clock
+    {Dot, NodeClock} = bvv:event(State#state.clock, State#state.id),
+    % test if this is a delete; if not, add dot-value to the DCC container
+    NewDCC =
+        case Operation of
+            ?DELETE_OP  -> % DELETE
+                % DiscardDCC;
+                dcc:add(DiscardDCC, {State#state.id, Dot}, ?DELETE_OP);
+            ?WRITE_OP   -> % PUT
+                dcc:add(DiscardDCC, {State#state.id, Dot}, Value)
+        end,
+    % save the new k\v and remove unnecessary causal information
+    _= strip_save_batch([{Key, NewDCC}], State#state{clock=NodeClock}),
+    % append the key to the tail of the key log
+    {Base, Keys} = State#state.keylog,
+    KeyLog = {Base, Keys ++ [Key]},
+    % Optionally collect stats
+    case State#state.stats of
+        true ->  ok;
+        false -> ok
+    end,
+    % return the updated node state
+    {reply, {ok, ReqID, NewDCC},
+        State#state{clock = NodeClock, keylog = KeyLog}}.
+
+
+handle_replicate({replicate, ReqID, Key, NewDCC}, State) ->
+    NodeClock = dcc:add(State#state.clock, NewDCC),
+    % get and fill the causal history of the local key
+    DiskDCC = guaranteed_get(Key, State),
+    % synchronize both objects
+    FinalDCC = dcc:sync(NewDCC, DiskDCC),
+    % test if the FinalDCC has newer information
+    NSK = case FinalDCC == DiskDCC of
+        true ->
+            lager:debug("Replicated object is ignored (already seen)"),
+            State#state.non_stripped_keys;
+        false ->
+            % save the new key DCC, while stripping the unnecessary causality
+            case strip_save_batch([{Key, FinalDCC}], State#state{clock=NodeClock}) of
+                [] ->
+                    State#state.non_stripped_keys;
+                _ ->
+                    add_key_to_NSK(Key, NewDCC, State#state.non_stripped_keys)
+            end
+    end,
+    % Optionally collect stats
+    case State#state.stats andalso FinalDCC =/= DiskDCC of
+        true ->  ok;
+        false -> ok
+    end,
+    % return the updated node state
+    {reply, {ok, ReqID}, State#state{clock = NodeClock, non_stripped_keys = NSK}}.
+
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%% SYNCHRONIZING
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+handle_sync_start({sync_start, ReqID}, State=#state{mode=recovering}) ->
+    {reply, {cancel, ReqID, recovering}, State};
+handle_sync_start({sync_start, ReqID}, State=#state{mode=normal}) ->
+    % choose a peer at random
+    NodeB = {IndexB, _} = dotted_db_utils:random_from_list(dotted_db_utils:peers(State#state.index)),
+    % get the NodeB entry from this node clock
+    EntryB = bvv:get(IndexB, State#state.clock),
+    % send a sync message to that node
+    {reply, {ok, ReqID, State#state.id, NodeB, EntryB}, State}.
+
+
+handle_sync_missing({sync_missing, ReqID, _, _}, State=#state{mode=recovering}) ->
+    {reply, {cancel, ReqID, recovering}, State};
+handle_sync_missing({sync_missing, ReqID, RemoteID={_,_}, LocalEntryInRemoteClock}, State=#state{mode=normal}) ->
+    {RemoteIndex,_} = RemoteID,
+    % get the all the dots (only the counters) from the local node clock, with id equal to the local node
+    LocalDots = bvv:values(bvv:get(State#state.id, State#state.clock)),
+    % get the all the dots (only the counters) from the asking node clock, with id equal to the local node
+    RemoteDots =  bvv:values(LocalEntryInRemoteClock),
+    % calculate what dots are present locally that the asking node does not have
+    MisssingDots = LocalDots -- RemoteDots,
+    {KBase, KeyList} = State#state.keylog,
+    % get the keys corresponding to the missing dots,
+    MissingKeys = [lists:nth(MDot-KBase, KeyList) || MDot <- MisssingDots, MDot > KBase],
+    % filter the keys that the asking node does not replicate
+    RelevantMissingKeys = [Key || Key <- MissingKeys,
+                            lists:member(RemoteIndex, dotted_db_utils:replica_nodes_indices(Key))],
+    % get each key's respective DCC
+    RelevantMissingObjects = [{Key, guaranteed_get_no_fill(Key, State)} || Key <- RelevantMissingKeys],
+    % strip any unnecessary causal information to save network bandwidth
+    StrippedObjects = [{Key, dcc:strip(DCC, State#state.clock)} || {Key,DCC} <- RelevantMissingObjects],
+    % Optionally collect stats
+    case State#state.stats andalso MissingKeys > 0 of
+        true ->
+            case length(StrippedObjects) > 0 of
+                true ->
+                    Ratio_Relevant_Keys = round(100*length(RelevantMissingKeys)/max(1,length(MissingKeys))),
+                    dotted_db_stats:notify({histogram, sync_relevant_ratio}, Ratio_Relevant_Keys),
+                    
+                    Ctx_Sent_Strip = [dcc:context(DCC) || {_Key, DCC} <- StrippedObjects],
+                    Sum_Ctx_Sent_Strip = lists:sum([length(DCC) || DCC <- Ctx_Sent_Strip]),
+                    Ratio_Sent_Strip = Sum_Ctx_Sent_Strip/max(1,length(StrippedObjects)),
+                    dotted_db_stats:notify({histogram, sync_sent_dcc_strip}, Ratio_Sent_Strip),
+        
+                    Size_Meta_Sent = byte_size(term_to_binary(Ctx_Sent_Strip)),
+                    dotted_db_stats:notify({histogram, sync_metadata_size}, Size_Meta_Sent),
+        
+                    Payload_Sent_Strip = [{Key, dcc:values(DCC)} || {Key, DCC} <- StrippedObjects],
+                    Size_Payload_Sent = byte_size(term_to_binary(Payload_Sent_Strip)),
+                    dotted_db_stats:notify({histogram, sync_payload_size}, Size_Payload_Sent),
+
+                    dotted_db_stats:notify({histogram, sync_sent_missing}, length(StrippedObjects)),
+                    ok;
+                false -> ok
+            end;
+        false -> ok
+    end,
+    % send the final objects and the base (contiguous) dots of the node clock to the asking node
+    {reply, {   ok,
+                ReqID,
+                State#state.id,
+                bvv:base(State#state.clock),
+                bvv:get(RemoteID, State#state.clock), % Remote entry in this node's global clock
+                StrippedObjects},
+        State}.
+
+handle_sync_repair({sync_repair, ReqID, _, _, _}, State=#state{mode=recovering}) ->
+    {reply, {cancel, ReqID, recovering}, State};
+handle_sync_repair({sync_repair, ReqID, RemoteNodeID={_,_}, RemoteClockBase, MissingObjects}, State=#state{mode=normal}) ->
+    NodeClock = sync_merge_clocks(RemoteNodeID, RemoteClockBase, State),
+    % get the local objects corresponding to the received objects and fill the
+    % causal history for all of them
+    FilledObjects =
+        [{ Key, fill_clock(Key, DCC, RemoteClockBase), guaranteed_get(Key, State) }
+         || {Key,DCC} <- MissingObjects],
+    % synchronize / merge the remote and local objects
+    SyncedObjects = [{ Key, dcc:sync(Remote, Local), Local } || {Key, Remote, Local} <- FilledObjects],
+    % filter the objects that are not missing after all
+    RealMissingObjects = [{ Key, Synced } || {Key, Synced, Local} <- SyncedObjects, Synced =/= Local],
+    % save the synced objects and strip their causal history
+    NonStrippedObjects = strip_save_batch(RealMissingObjects, State#state{clock=NodeClock}),
+    % RealMissingObjects2 = [{Key, DCC, save_kv(Key, DCC, State#state{clock=NodeClock})} || {Key, DCC} <- RealMissingObjects],
+    % % filter the keys that were totally stripped
+    % NonStrippedObjects = [{Key, DCC} || {Key, DCC, N} <- RealMissingObjects2, N =/= 0],
+    % schedule a later strip attempt for non-stripped synced keys
+    NSK = add_keys_to_NSK(NonStrippedObjects, State#state.non_stripped_keys),
+    % update the replicated clock to reflect what the asking node has about the local node
+    {Base,_} = bvv:get(State#state.id, RemoteClockBase),
+    Replicated = vv:add(State#state.replicated, {RemoteNodeID, Base}),
+    % Garbage Collect keys from the KeyLog and delete keys with no causal context
+    State2 = gc_keylog(State#state{clock=NodeClock, non_stripped_keys=NSK, replicated=Replicated}),
+    % Optionally collect stats
+    case State2#state.stats of
+        true ->
+            Repaired = length(RealMissingObjects),
+            Sent = length(MissingObjects),
+            Hit_Ratio = 100*Repaired/max(1, Sent),
+            Hit_Ratio =/= 0.0 andalso Sent =/= 0 andalso
+                dotted_db_stats:notify({histogram, sync_hit_ratio}, Hit_Ratio),
+            ok;
+        false ->
+            ok
+    end,
+    {reply, {ok, ReqID}, State2}.
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%% Restarting Vnode (and recovery of keys)
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+%% On the restarting node
+handle_restart({restart, ReqID}, State=#state{mode=recovering}) ->
+    {reply, {cancel, ReqID, recovering}, State};
+handle_restart({restart, ReqID}, State=#state{mode=normal}) ->
+    ThisVnode = {State#state.index, node()},
+    OldVnodeID = State#state.id,
+    {MyBase,0} = bvv:get(OldVnodeID, State#state.clock),
+    NewVnodeID = new_vnode_id(State#state.index),
+    NewReplicated = vv:reset_with_same_ids(State#state.replicated),
+    CurrentPeers = dotted_db_utils:peers(State#state.index),
+    true = delete_ets_all_keys(State#state.atom_id),
+    NewAtomID = create_ets_all_keys(NewVnodeID),
+    {ok, Storage1} = dotted_db_storage:drop(State#state.storage),
+    ok = dotted_db_storage:close(Storage1),
+    % open the storage backend for the key-values of this vnode
+    {_, NewStorage} = open_storage(State#state.index),
+    ok = save_vnode_state(State#state.dets, {NewVnodeID, bvv:new(), {0,[]}, NewReplicated, []}),
+    {reply, {ok, ReqID, {ReqID, ThisVnode, OldVnodeID, NewVnodeID, MyBase}, CurrentPeers},
+        State#state{
+            id                  = NewVnodeID,
+            atom_id             = NewAtomID,
+            clock               = bvv:new(),
+            keylog              = {0,[]},
+            replicated          = NewReplicated,
+            non_stripped_keys   = {[],[]},
+            recover_keys        = [],
+            storage             = NewStorage,
+            syncs               = initialize_syncs(State#state.index),
+            updates_mem         = 0,
+            mode                = recovering}}.
+
+%% On the good nodes
+handle_inform_peers_restart({inform_peers_restart, {ReqID, RestartingVnode, OldVnodeID, NewVnodeID, RemoteBase}}, State) ->
+    % jump the base counter of the old id in the node clock, to make sure we "win"
+    % against all keys potentially not stripped yet because of that old id
+    NodeClock0 = bvv:store_entry(OldVnodeID, {RemoteBase+100000,0}, State#state.clock),
+    % add the new node id to the node clock
+    NewClock = bvv:add(NodeClock0, {NewVnodeID, 0}),
+    % remove the old node id from the replicated
+    NewReplicated0 = vv:delete_key(State#state.replicated, OldVnodeID),
+    % remove the new node id to the replicated
+    NewReplicated = vv:add(NewReplicated0, {NewVnodeID, 0}),
+    % add the new node id to the node clock
+    AllKeys = get_all_keys(State),
+    FunFilter = fun (Key) ->
+                    RN = dotted_db_utils:replica_nodes(Key),
+                    lists:member(RestartingVnode, RN)
+                end,
+    RelevantKeys = lists:filter(FunFilter, AllKeys),
+    {Now, Later} = lists:split(min(?MAX_KEYS_SENT_RECOVERING,length(RelevantKeys)), RelevantKeys),
+    lager:info("Restart transfer => Now: ~p Later: ~p",[length(Now), length(Later)]),
+    % get each key's respective DCC
+    RelevantMissingObjects = [{Key, guaranteed_get_no_fill(Key, State)} || Key <- Now],
+    % strip any unnecessary causal information to save network bandwidth
+    StrippedObjects = [{Key, dcc:strip(DCC, NewClock)} || {Key,DCC} <- RelevantMissingObjects],
+    % save the rest of the keys for later (if there's any)
+    {LastBatch, RecoverKeys} = case Later of
+        [] -> {true, State#state.recover_keys};
+        _ -> {false, [{NewVnodeID, Later} | State#state.recover_keys]}
+    end,
+    {reply, { ok, stage1, ReqID, {
+                ReqID,
+                {State#state.index, node()},
+                State#state.id,
+                NewClock, %bvv:base(NewClock),
+                StrippedObjects,
+                LastBatch % is this the last batch?
+            }}, State#state{clock=NewClock, replicated=NewReplicated, recover_keys=RecoverKeys}}.
+
+%% On the restarting node
+handle_recover_keys({recover_keys, {ReqID, RemoteVnode, _RemoteVnodeId={_,_}, RemoteClock, Objects, _LastBatch=false}}, State) ->
+    % save the objects and return the ones that were not totally filtered
+    NonStrippedObjects = fill_strip_save_kvs(Objects, RemoteClock, State),
+    % schedule a later strip attempt for non-stripped synced keys
+    NSK = add_keys_to_NSK(NonStrippedObjects, State#state.non_stripped_keys),
+    {reply, {ok, stage2, ReqID, RemoteVnode}, State#state{non_stripped_keys=NSK}};
+%% On the restarting node
+handle_recover_keys({recover_keys, {ReqID, RemoteVnode, RemoteNodeID={_,_}, RemoteClock, Objects, _LastBatch=true}}, State) ->
+    % merge the remote clock with our own clock
+    NodeClock0 = bvv:merge(State#state.clock, RemoteClock),
+    % filter ids from non-peer nodes
+    PeerIndices = [State#state.index]++[Idx || {Idx,_} <- dotted_db_utils:peers(State#state.index)],
+    NodeClock = orddict:filter(fun({Index,_}, _) -> lists:member(Index, PeerIndices) end, NodeClock0),
+    % update the replicated clock to reflect what the asking node has about the local node
+    {Base,_} = bvv:get(State#state.id, RemoteClock),
+    Replicated = vv:add(State#state.replicated, {RemoteNodeID, Base}),
+    % save the objects and return the ones that were not totally filtered
+    NonStrippedObjects = fill_strip_save_kvs(Objects, RemoteClock, State#state{clock=NodeClock}),
+    % schedule a later strip attempt for non-stripped synced keys
+    NSK = add_keys_to_NSK(NonStrippedObjects, State#state.non_stripped_keys),
+    % Garbage Collect keys from the KeyLog and delete keys with no causal context
+    State2 = gc_keylog(State#state{clock=NodeClock, non_stripped_keys=NSK, replicated=Replicated}),
+    {reply, {ok, stage4, ReqID, RemoteVnode}, State2#state{mode=normal}}.
+
+%% On the good nodes
+handle_inform_peers_restart2({inform_peers_restart2, {ReqID, NewVnodeID}}, State) ->
+    {LastBatch1, Objects, RecoverKeys1} =
+        case proplists:get_value(NewVnodeID, State#state.recover_keys) of
+            undefined ->
+                {true, [], State#state.recover_keys};
+            RelevantKeys ->
+                RK = proplists:delete(NewVnodeID, State#state.recover_keys),
+                {Now, Later} = lists:split(min(?MAX_KEYS_SENT_RECOVERING,length(RelevantKeys)), RelevantKeys),
+                % get each key's respective DCC
+                RelevantMissingObjects = [{Key, guaranteed_get_no_fill(Key, State)} || Key <- Now],
+                % strip any unnecessary causal information to save network bandwidth
+                StrippedObjects = [{Key, dcc:strip(DCC, State#state.clock)} || {Key,DCC} <- RelevantMissingObjects],
+                % save the rest of the keys for later (if there's any)
+                {LastBatch, RecoverKeys} = case Later of
+                    [] -> {true, RK};
+                    _ -> {false, [{NewVnodeID, Later} | RK]}
+                end,
+                {LastBatch, StrippedObjects, RecoverKeys}
+        end,
+    {reply, { ok, stage3, ReqID, {
+                ReqID,
+                {State#state.index, node()},
+                State#state.id,
+                State#state.clock, %bvv:base(State#state.clock),
+                Objects,
+                LastBatch1 % is this the last batch?
+            }}, State#state{recover_keys=RecoverKeys1}}.
+
+
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%% Aux functions
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 fill_clock(Key={_,_}, LocalClock, GlobalClock) ->
     % dcc:fill(LocalClock, GlobalClock, dotted_db_utils:replica_nodes_indices(Key)).
@@ -935,6 +953,22 @@ guaranteed_get(Key, State) ->
         DCC ->
             % get and fill the causal history of the local object
             fill_clock(Key, DCC, State#state.clock)
+    end.
+
+
+guaranteed_get_no_fill(Key, State) ->
+    case dotted_db_storage:get(State#state.storage, Key) of
+        {error, not_found} ->
+            % there is no key K in this node
+            dcc:new();
+        {error, Error} ->
+            % some unexpected error
+            lager:error("Error reading a key from storage (guaranteed GET): ~p", [Error]),
+            % assume that the key was lost, i.e. it's equal to not_found
+            dcc:new();
+        DCC ->
+            % get and fill the causal history of the local object
+            DCC
     end.
 
 % @doc Saves the relevant vnode state to the storage.
@@ -1011,6 +1045,7 @@ open_storage(Index) ->
 % @doc Close the key-value backend, save the vnode state and close the DETS file.
 close_all(undefined) -> ok;
 close_all(_State=#state{id          = Id,
+                        atom_id     = AtomID,
                         storage     = Storage,
                         clock       = NodeClock,
                         replicated  = Replicated,
@@ -1023,20 +1058,20 @@ close_all(_State=#state{id          = Id,
             lager:warning("Error on closing storage: ~p",[Reason])
     end,
     ok = save_vnode_state(Dets, {Id, NodeClock, KeyLog, Replicated, NSK}),
-    true = delete_ets_all_keys(Id),
+    true = delete_ets_all_keys(AtomID),
     ok = dets:close(Dets).
 
 get_issued_deleted_keys(Id) ->
-    ets:select(get_ets_id(Id),[{{'$1', '$2'}, [{'==', '$2', 0}], ['$1'] }]).
+    ets:select(Id, [{{'$1', '$2'}, [{'==', '$2', 0}], ['$1'] }]).
 
 get_actual_deleted_keys(Id) ->
-    ets:select(get_ets_id(Id),[{{'$1', '$2'}, [{'==', '$2', 1}], ['$1'] }]).
+    ets:select(Id, [{{'$1', '$2'}, [{'==', '$2', 1}], ['$1'] }]).
 
 get_written_keys(Id) ->
-    ets:select(get_ets_id(Id),[{{'$1', '$2'}, [{'==', '$2', 2}], ['$1'] }]).
+    ets:select(Id, [{{'$1', '$2'}, [{'==', '$2', 2}], ['$1'] }]).
 
 get_final_written_keys(Id) ->
-    ets:select(get_ets_id(Id),[{{'$1', '$2'}, [{'==', '$2', 3}], ['$1'] }]).
+    ets:select(Id, [{{'$1', '$2'}, [{'==', '$2', 3}], ['$1'] }]).
 
 get_ets_id(Id) ->
     list_to_atom(lists:flatten(io_lib:format("~p", [Id]))).
@@ -1064,7 +1099,7 @@ gc_keylog(State) ->
                                 {RemKeys, {MinimumDot, CurrentKeys}}
                         end,
                     % add the non stripped keys to the node state for later strip attempt
-                    NSK = add_keys_to_strip_schedule_keylog(RemovedKeys, State#state.id, KBase, State#state.non_stripped_keys),
+                    NSK = add_keys_from_keylog_to_NSK(RemovedKeys, State#state.id, KBase, State#state.non_stripped_keys),
                     % Optionally collect stats
                     case State#state.stats of
                         true -> ok;
@@ -1085,15 +1120,6 @@ schedule_strip_keys(Interval) ->
     erlang:send_after(Interval, self(), strip_keys),
     ok.
 
--spec maybe_tick(state()) -> state().
-maybe_tick(State=#state{stats=false}) ->
-    schedule_report(State#state.report_interval),
-    State;
-maybe_tick(State=#state{stats=true}) ->
-    {_, NextState} = report(State),
-    schedule_report(State#state.report_interval),
-    NextState.
-
 -spec schedule_report(non_neg_integer()) -> ok.
 schedule_report(Interval) ->
     %% Perform tick every X seconds
@@ -1110,7 +1136,7 @@ report(State=#state{    id                  = Id,
                         updates_mem         = UpMem } ) ->
     report_stats(State),
     % increment the updates since saving
-    UpdatesMemory =  case UpMem =< ?UPDATE_LIMITE*10 of
+    UpdatesMemory =  case UpMem =< ?UPDATE_LIMITE*50 of
         true -> % it's still early to save to storage
             UpMem + 1;
         false ->
@@ -1121,36 +1147,31 @@ report(State=#state{    id                  = Id,
     end,
     {ok, State#state{updates_mem=UpdatesMemory}}.
 
-report_stats(State) ->
-    % Optionally collect stats
-    case State#state.stats of
-        true ->
-            {_B1,K1} = State#state.keylog,
-            dotted_db_stats:notify({histogram, kl_len}, length(K1)),
-            dotted_db_stats:notify({histogram, kl_size}, size(term_to_binary(State#state.keylog))),
 
+report_stats(State=#state{stats=true}) ->
+    {_B1,K1} = State#state.keylog,
+    dotted_db_stats:notify({histogram, kl_len}, length(K1)),
+    dotted_db_stats:notify({histogram, kl_size}, size(term_to_binary(State#state.keylog))),
 
-            MissingDots = [ miss_dots(Entry) || {_,Entry} <- State#state.clock ],
-            dotted_db_stats:notify({histogram, bvv_missing_dots}, average(MissingDots)),
-            dotted_db_stats:notify({histogram, bvv_size}, size(term_to_binary(State#state.clock))),
+    MissingDots = [ miss_dots(Entry) || {_,Entry} <- State#state.clock ],
+    dotted_db_stats:notify({histogram, bvv_missing_dots}, average(MissingDots)),
+    dotted_db_stats:notify({histogram, bvv_size}, size(term_to_binary(State#state.clock))),
 
-            {Del,Wrt} = State#state.non_stripped_keys,
-            NumNSKeys = lists:sum([dict:size(Map) || {_, Map} <- Wrt]) + length(Del),
-            dotted_db_stats:notify({histogram, nsk_number}, NumNSKeys),
-            dotted_db_stats:notify({histogram, nsk_size}, size(term_to_binary(State#state.non_stripped_keys))),
+    {Del,Wrt} = State#state.non_stripped_keys,
+    NumNSKeys = lists:sum([dict:size(Map) || {_, Map} <- Wrt]) + length(Del),
+    dotted_db_stats:notify({histogram, nsk_number}, NumNSKeys),
+    dotted_db_stats:notify({histogram, nsk_size}, size(term_to_binary(State#state.non_stripped_keys))),
 
-            ADelKeys = length(get_actual_deleted_keys(State#state.id)),
-            IDelKeys = length(get_issued_deleted_keys(State#state.id)),
-            dotted_db_stats:notify({histogram, deletes_incomplete}, IDelKeys),
-            dotted_db_stats:notify({histogram, deletes_completed}, ADelKeys),
+    ADelKeys = length(get_actual_deleted_keys(State#state.atom_id)),
+    IDelKeys = length(get_issued_deleted_keys(State#state.atom_id)),
+    dotted_db_stats:notify({histogram, deletes_incomplete}, IDelKeys),
+    dotted_db_stats:notify({histogram, deletes_completed}, ADelKeys),
 
-            IWKeys = length(get_written_keys(State#state.id)),
-            FWKeys = length(get_final_written_keys(State#state.id)),
-            dotted_db_stats:notify({histogram, write_incomplete}, IWKeys),
-            dotted_db_stats:notify({histogram, write_completed}, FWKeys),
-            ok;
-        false -> ok
-    end.
+    IWKeys = length(get_written_keys(State#state.atom_id)),
+    FWKeys = length(get_final_written_keys(State#state.atom_id)),
+    dotted_db_stats:notify({histogram, write_incomplete}, IWKeys),
+    dotted_db_stats:notify({histogram, write_completed}, FWKeys),
+    ok.
 
 miss_dots({N,B}) ->
     case values_aux(N,B,[]) of
@@ -1172,40 +1193,246 @@ average([H|T], Length, Sum) ->
 average([], Length, Sum) ->
     Sum / max(1,Length).
 
-save_kv(Key={_,_}, ValueDCC, State) ->
-    save_kv(Key, ValueDCC, State, true).
-save_kv(Key={_,_}, ValueDCC, State, ETS) ->
+
+
+strip_save_batch(O,S) -> strip_save_batch(O,S,true).
+strip_save_batch(Objects, State, ETS) ->
+    strip_save_batch(Objects, State, {[],[]}, ETS).
+
+strip_save_batch([], State, {NSK, StrippedObjects}, _ETS) ->
+    ok = dotted_db_storage:write_batch(State#state.storage, StrippedObjects),
+    NSK;
+strip_save_batch([{Key={_,_}, DCC} | Objects], State, {NSK, StrippedObjects}, ETS) ->
     % removed unnecessary causality from the DCC, based on the current node clock
-    StrippedDCC = {Values, Context} = dcc:strip(ValueDCC, State#state.clock),
+    StrippedDCC = {Values, Context} = dcc:strip(DCC, State#state.clock),
     Values2 = [{D,V} || {D,V} <- Values, V =/= ?DELETE_OP],
-    % StrippedDCC = {Values2, Context},
     % the resulting object/DCC is one of the following options:
     %   * it has no value and no causal history -> can be deleted
     %   * it has no value but has causal history -> it's a delete, but still must be persisted
     %   * has values, with causal context -> it's a normal write and we should persist
     %   * has values, but no causal context -> it's the final form for this write
-    case {Values2, Context} of
+    Acc = case {Values2, Context} of
         {[],[]} ->
-            ETS andalso ets:insert(get_ets_id(State#state.id), {Key, 1}),
-            ok = dotted_db_storage:delete(State#state.storage, Key),
-            0;
-        {[],CC} ->
-            ETS andalso ets:insert(get_ets_id(State#state.id), {Key, 0}),
-            ok = dotted_db_storage:put(State#state.storage, Key, StrippedDCC),
-            length(CC);
+            ETS andalso ets:insert(State#state.atom_id, {Key, 1}),
+            {NSK,                       [{delete, Key}|StrippedObjects]};
+        {[],_CC} ->
+            ETS andalso ets:insert(State#state.atom_id, {Key, 0}),
+            {[{Key, StrippedDCC}|NSK],  [{put, Key, StrippedDCC}|StrippedObjects]};
         {_ ,[]} ->
-            ETS andalso ets:insert(get_ets_id(State#state.id), {Key, 3}),
-            ok = dotted_db_storage:put(State#state.storage, Key, StrippedDCC),
-            0;
-        {_ ,CC} ->
-            ETS andalso ets:insert(get_ets_id(State#state.id), {Key, 2}),
-            ok = dotted_db_storage:put(State#state.storage, Key, StrippedDCC),
-            length(CC)
+            ETS andalso ets:insert(State#state.atom_id, {Key, 3}),
+            {NSK,                       [{put, Key, StrippedDCC}|StrippedObjects]};
+        {_ ,_CC} ->
+            ETS andalso ets:insert(State#state.atom_id, {Key, 2}),
+            {[{Key, StrippedDCC}|NSK],  [{put, Key, StrippedDCC}|StrippedObjects]}
+    end,
+    strip_save_batch(Objects, State, Acc, ETS).
+
+
+
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%
+%%      Try to remove elements from Non-Stripped Keys
+%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+%% @doc Used periodically to see which non-stripped keys can be stripped.
+-spec read_strip_write({[{key(),vv()}], [{dot(), dict:dict()}]}, state()) -> {[{key(),vv()}], [{dot(), dict:dict()}]}.
+read_strip_write({Deletes, Writes}, State) ->
+    {Stripped, NotStripped} = split_deletes(Deletes, State, {[],[]}),
+    Deletes2 = strip_maybe_save_delete_batch(Stripped, State) ++ NotStripped,
+    Writes2 = compute_writes_NSK(Writes, State, []),
+    {Deletes2, Writes2}.
+
+split_deletes([], _State, Acc) -> Acc;
+split_deletes([{Key, Ctx} | Deletes], State, {Stripped, NotStripped}) ->
+    case strip_context(Ctx,State#state.clock) of
+        [] -> 
+            case read_one_key(Key, State) of
+                0   ->
+                    ets:insert(State#state.atom_id, {Key, 1}),
+                    split_deletes(Deletes, State, {Stripped, NotStripped});
+                DCC ->
+                    split_deletes(Deletes, State, {[{Key, DCC}|Stripped], NotStripped})
+            end;
+        VV ->
+            split_deletes(Deletes, State, {Stripped, [{Key, VV}|NotStripped]})
     end.
 
+-spec strip_context(vv(), bvv()) -> vv().
+strip_context(Context, NodeClock) ->
+    FunFilter = 
+        fun (Id, Counter) -> 
+            {Base,_Dots} = bvv:get(Id, NodeClock),
+            Counter > Base
+        end,
+    vv:filter(FunFilter, Context).
+
+
+strip_maybe_save_delete_batch(O,S) -> strip_maybe_save_delete_batch(O,S,true).
+strip_maybe_save_delete_batch(Objects, State, ETS) ->
+    strip_maybe_save_delete_batch(Objects, State, {[],[]}, ETS).
+
+strip_maybe_save_delete_batch([], State, {NSK, StrippedObjects}, _ETS) ->
+    ok = dotted_db_storage:write_batch(State#state.storage, StrippedObjects),
+    NSK;
+strip_maybe_save_delete_batch([{Key={_,_}, DCC} | Objects], State, {NSK, StrippedObjects}, ETS) ->
+    % removed unnecessary causality from the DCC, based on the current node clock
+    StrippedDCC = {Values, Context} = dcc:strip(DCC, State#state.clock),
+    Values2 = [{D,V} || {D,V} <- Values, V =/= ?DELETE_OP],
+    % the resulting object/DCC is one of the following options:
+    %   * it has no value and no causal history -> can be deleted
+    %   * it has no value but has causal history -> it's a delete, but still must be persisted
+    %   * has values, with causal context -> it's a normal write and we should persist
+    %   * has values, but no causal context -> it's the final form for this write
+    Acc = case {Values2, Context} of
+        {[],[]} ->
+            ETS andalso ets:insert(State#state.atom_id, {Key, 1}),
+            {NSK,                   [{delete, Key}|StrippedObjects]};
+        {_ ,[]} ->
+            ETS andalso ets:insert(State#state.atom_id, {Key, 3}),
+            {NSK,                   [{put, Key, StrippedDCC}|StrippedObjects]};
+        {[],_CC} ->
+            {[{Key, Context}|NSK],  StrippedObjects};
+        {_ ,_CC} ->
+            {[{Key, Context}|NSK],  StrippedObjects}
+    end,
+    strip_maybe_save_delete_batch(Objects, State, Acc, ETS).
+
+
+compute_writes_NSK([], _State, Acc) -> Acc;
+compute_writes_NSK([{NodeID, Map} |Tail], State, Acc) ->
+    {Stripped, NotStripped} = split_writes(dict:to_list(Map), State, {[],[]}),
+    Writes = strip_maybe_save_writes_batch(Stripped, State) ++ NotStripped,
+    Acc2 = case Writes of
+        [] -> Acc;
+        _  -> [{NodeID, dict:from_list(Writes)} | Acc]
+    end,
+    compute_writes_NSK(Tail, State, Acc2).
+
+split_writes([], _State, Acc) -> Acc;
+split_writes([{Dot, {Key, undefined}} | Deletes], State, {Stripped, NotStripped}) ->
+    case read_one_key(Key, State) of
+        0   ->
+            ets:insert(State#state.atom_id, {Key, 3}),
+            split_writes(Deletes, State, {Stripped, NotStripped});
+        DCC ->
+            split_writes(Deletes, State, {[{Dot, {Key, DCC}}|Stripped], NotStripped})
+    end;
+split_writes([{Dot, {Key, Ctx}} | Deletes], State, {Stripped, NotStripped}) ->
+    case strip_context(Ctx, State#state.clock) of
+        [] -> 
+            case read_one_key(Key, State) of
+                0   ->
+                    ets:insert(State#state.atom_id, {Key, 3}),
+                    split_writes(Deletes, State, {Stripped, NotStripped});
+                DCC ->
+                    split_writes(Deletes, State, {[{Dot, {Key, DCC}}|Stripped], NotStripped})
+            end;
+        VV ->
+            split_writes(Deletes, State, {Stripped, [{Dot, {Key, VV}}|NotStripped]})
+    end.
+
+strip_maybe_save_writes_batch(O,S) -> strip_maybe_save_writes_batch(O,S,true).
+strip_maybe_save_writes_batch(Objects, State, ETS) ->
+    strip_maybe_save_writes_batch(Objects, State, {[],[]}, ETS).
+
+strip_maybe_save_writes_batch([], State, {NSK, StrippedObjects}, _ETS) ->
+    ok = dotted_db_storage:write_batch(State#state.storage, StrippedObjects),
+    NSK;
+strip_maybe_save_writes_batch([{Dot, {Key={_,_}, DCC}} | Objects], State, {NSK, StrippedObjects}, ETS) ->
+    % removed unnecessary causality from the DCC, based on the current node clock
+    StrippedDCC = {Values, Context} = dcc:strip(DCC, State#state.clock),
+    Values2 = [{D,V} || {D,V} <- Values, V =/= ?DELETE_OP],
+    % the resulting object/DCC is one of the following options:
+    %   * it has no value and no causal history -> can be deleted
+    %   * it has no value but has causal history -> it's a delete, but still must be persisted
+    %   * has values, with causal context -> it's a normal write and we should persist
+    %   * has values, but no causal context -> it's the final form for this write
+    Acc = case {Values2, Context} of
+        {[],[]} ->
+            ETS andalso ets:insert(State#state.atom_id, {Key, 1}),
+            {NSK,                           [{delete, Key}|StrippedObjects]};
+        {_ ,[]} ->
+            ETS andalso ets:insert(State#state.atom_id, {Key, 3}),
+            {NSK,                           [{put, Key, StrippedDCC}|StrippedObjects]};
+        {[],_CC} ->
+            {[{Dot, {Key, Context}}|NSK],   StrippedObjects};
+        {_ ,_CC} ->
+            {[{Dot, {Key, Context}}|NSK],   StrippedObjects}
+    end,
+    strip_maybe_save_writes_batch(Objects, State, Acc, ETS).
+
+
+read_one_key(Key={_,_}, State) ->
+    case dotted_db_storage:get(State#state.storage, Key) of
+        {error, not_found} ->
+            0;
+        {error, Error} ->
+            % some unexpected error
+            lager:error("Error reading a key from storage: ~p", [Error]),
+            % assume that the key was lost, i.e. it's equal to not_found
+            0;
+        DCC ->
+            DCC
+    end.
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%
+%%      Add elements to Non-Stripped Keys
+%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+add_keys_to_NSK([], NSK) -> NSK;
+add_keys_to_NSK([{Key, DCC}|Tail], NSK) ->
+    NSK2 = add_key_to_NSK(Key, DCC, NSK),
+    add_keys_to_NSK(Tail, NSK2).
+
+% @doc Add a replicated key and DCC to the list of non-stripped-keys
+add_key_to_NSK(_, {[],[]}, NSK) -> NSK;
+add_key_to_NSK(Key, {[],Ctx}, {Del,Wrt}) ->
+    {[{Key, Ctx}|Del], Wrt};
+add_key_to_NSK(Key, {DotValues,Ctx}, NSK) ->
+    KeyDots = [{Key, Dot, Ctx} || {Dot,_} <- DotValues],
+    add_writes_to_NSK(KeyDots, NSK).
+
+add_writes_to_NSK([], NSK) -> NSK;
+add_writes_to_NSK([Head={_,_,_} | Tail], {Del,Wrt}) ->
+    Wrt2 = add_one_write_to_NSK(Head, Wrt),
+    add_writes_to_NSK(Tail, {Del,Wrt2}).
+
+
+add_keys_from_keylog_to_NSK([], _, _, NSK) -> NSK;
+add_keys_from_keylog_to_NSK([Key={_,_}|Tail], NodeID={_,_}, Base, {Del,Wrt}) ->
+    Wrt2 = add_one_write_to_NSK({Key, {NodeID, Base+1}, undefined}, Wrt),
+    add_keys_from_keylog_to_NSK(Tail, NodeID, Base+1, {Del,Wrt2}).
+
+
+add_one_write_to_NSK({Key, {NodeID,Counter}, Context}, []) ->
+    [{NodeID, dict:store(Counter, {Key, Context}, dict:new())}];
+add_one_write_to_NSK({Key, {NodeID, Counter}, Context}, [{NodeID2, Dict}|Tail])
+    when NodeID =:= NodeID2 andalso Counter =/= -1 ->
+    Dict2 =  dict:store(Counter, {Key, Context}, Dict),
+    [{NodeID, Dict2} | Tail];
+add_one_write_to_NSK(KV={_, {NodeID,_}, _}, [H={NodeID2, _}|Tail])
+    when NodeID =/= NodeID2  ->
+    [H | add_one_write_to_NSK(KV, Tail)].
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%
+%%      Recovering vnode saves multiples objects from peers
+%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+%% For recovering keys remotely after a vnode crash/failure (with lost key-values)
 fill_strip_save_kvs(Objects, RemoteClock, State) ->
     fill_strip_save_kvs(Objects, RemoteClock, State, {[],[]}, true).
-
 
 fill_strip_save_kvs([], _, State, {NSK, StrippedObjects}, _ETS) ->
     ok = dotted_db_storage:write_batch(State#state.storage, StrippedObjects),
@@ -1224,88 +1451,20 @@ fill_strip_save_kvs([{Key={_,_}, DCC} | Objects], RemoteClock, State, {NSK, Stri
     %   * has values, but no causal context -> it's the final form for this write
     Acc = case {Values2, Context} of
         {[],[]} ->
-            ETS andalso ets:insert(get_ets_id(State#state.id), {Key, 1}),
+            ETS andalso ets:insert(State#state.atom_id, {Key, 1}),
             {NSK,                       [{delete, Key}|StrippedObjects]};
         {[],_CC} ->
-            ETS andalso ets:insert(get_ets_id(State#state.id), {Key, 0}),
+            ETS andalso ets:insert(State#state.atom_id, {Key, 0}),
             {[{Key, StrippedDCC}|NSK],  [{put, Key, StrippedDCC}|StrippedObjects]};
         {_ ,[]} ->
-            ETS andalso ets:insert(get_ets_id(State#state.id), {Key, 3}),
+            ETS andalso ets:insert(State#state.atom_id, {Key, 3}),
             {NSK,                       [{put, Key, StrippedDCC}|StrippedObjects]};
         {_ ,_CC} ->
-            ETS andalso ets:insert(get_ets_id(State#state.id), {Key, 2}),
+            ETS andalso ets:insert(State#state.atom_id, {Key, 2}),
             {[{Key, StrippedDCC}|NSK],  [{put, Key, StrippedDCC}|StrippedObjects]}
     end,
     fill_strip_save_kvs(Objects, RemoteClock, State, Acc, ETS).
 
-
-read_strip_write({Deletes, Writes}, State) ->
-    Writes2 = read_strip_write_for_writes(Writes, State, []),
-    Deletes2 = [Key || Key <- Deletes, 0 =/= read_strip_write_one_key(Key, State)],
-    {Deletes2, Writes2}.
-
-read_strip_write_for_writes([], _State, Acc) -> Acc;
-read_strip_write_for_writes([ {NodeID={_,_}, Map} |Tail], State, Acc) ->
-    Writes = [{Dot, Key} || {Dot, Key} <- dict:to_list(Map), 0 =/= read_strip_write_one_key(Key, State)],
-    Acc2 = case Writes of
-        [] -> Acc;
-        _  -> [{NodeID, dict:from_list(Writes)} | Acc]
-    end,
-    read_strip_write_for_writes(Tail, State, Acc2).
-
-
-read_strip_write_one_key(Key={_,_}, State) ->
-    case dotted_db_storage:get(State#state.storage, Key) of
-        {error, not_found} ->
-            0;
-        {error, Error} ->
-            % some unexpected error
-            lager:error("Error reading a key from storage: ~p", [Error]),
-            % assume that the key was lost, i.e. it's equal to not_found
-            -1;
-        DCC ->
-            % save the new k\v and remove unnecessary causal information
-            save_kv(Key, DCC, State)
-    end.
-
-add_keys_to_strip_schedule_objects([], _, NSK) -> NSK;
-add_keys_to_strip_schedule_objects([{_, {_,[]}}|Tail], NodeID={_,_}, NSK) ->
-    % this object has no context -> no need to revisit later
-     add_keys_to_strip_schedule_objects(Tail, NodeID, NSK);
-add_keys_to_strip_schedule_objects([{Key={_,_}, {[],_}}|Tail], NodeID={_,_}, {Del,Wrt}) ->
-    % it's a delete with context; save the key to strip and actually delete later
-    add_keys_to_strip_schedule_objects(Tail, NodeID, {[Key|Del], Wrt});
-add_keys_to_strip_schedule_objects([{Key={_,_}, {DotValues,_}}|Tail], NodeID={_,_}, NSK) ->
-    KeyDots = [{Key, Dot} || {Dot,_} <- DotValues],
-    NSK2 = add_keys_to_strip_schedule(KeyDots, NSK),
-    add_keys_to_strip_schedule_objects(Tail, NodeID, NSK2).
-
-
-add_keys_to_strip_schedule_keylog([], _, _, NSK) -> NSK;
-add_keys_to_strip_schedule_keylog([Key={_,_}|Tail], NodeID={_,_}, Base, {Del,Wrt}) ->
-    KeyDot = {Key, {NodeID, Base+1}},
-    Wrt2 = add_key_to_strip_schedule(KeyDot, Wrt),
-    add_keys_to_strip_schedule_keylog(Tail, NodeID, Base+1, {Del,Wrt2}).
-
-add_keys_to_strip_schedule([], NSK) -> NSK;
-add_keys_to_strip_schedule([Head={_,_} | Tail], {Del,Wrt}) ->
-    Wrt2 = add_key_to_strip_schedule(Head, Wrt),
-    add_keys_to_strip_schedule(Tail, {Del,Wrt2}).
-
-
-add_key_to_strip_schedule({Key={_,_}, {NodeID={_,_},Counter}}, []) ->
-    [{NodeID, dict:store(Counter, Key, dict:new())}];
-% add_key_to_strip_schedule({Key={_,_}, {NodeID={_,_}, -1}}, [{NodeID2={_,_}, Dict}|Tail])
-%     when NodeID =:= NodeID2  ->
-%     Dict2 =  dict:append(-1, Key, Dict),
-%     [{NodeID, Dict2} | Tail];
-add_key_to_strip_schedule({Key={_,_}, {NodeID={_,_}, Counter}}, [{NodeID2={_,_}, Dict}|Tail])
-    when NodeID =:= NodeID2 andalso Counter =/= -1 ->
-    Dict2 =  dict:store(Counter, Key, Dict),
-    [{NodeID, Dict2} | Tail];
-add_key_to_strip_schedule(KV={_, {NodeID={_,_},_}}, [H={NodeID2={_,_}, _}|Tail])
-    when NodeID =/= NodeID2  ->
-    [H | add_key_to_strip_schedule(KV, Tail)].
 
 
 is_replicated_vv_up_to_date(State) ->
@@ -1321,13 +1480,12 @@ new_vnode_id(Index) ->
 
 create_ets_all_keys(NewVnodeID) ->
     AtomID = get_ets_id(NewVnodeID),
-    _ = ((ets:info(AtomID) /= undefined) orelse
-        ets:new(AtomID, [named_table, public, set, {write_concurrency, false}])),
-    ok.
+    _ = ((ets:info(AtomID) =:= undefined) andalso
+            ets:new(AtomID, [named_table, public, set, {write_concurrency, false}])),
+    AtomID.
 
-delete_ets_all_keys(Id) ->
-    AtomID = get_ets_id(Id),
-    _ = ((ets:info(AtomID) /= undefined) orelse ets:delete(AtomID)),
+delete_ets_all_keys(AtomID) ->
+    _ = ((ets:info(AtomID) =:= undefined) andalso ets:delete(AtomID)),
     true.
 
 sync_merge_clocks(RemoteNodeID, RemoteClockBase, State) ->
@@ -1349,6 +1507,6 @@ sync_merge_clocks(RemoteNodeID, RemoteClockBase, State) ->
     bvv:store_entry(RemoteNodeID, RemoteEntry, NodeClock0).
 
 get_all_keys(State) ->
-    get_written_keys(State#state.id) ++ 
-    get_final_written_keys(State#state.id) ++
-    get_issued_deleted_keys(State#state.id).
+    get_written_keys(State#state.atom_id) ++ 
+    get_final_written_keys(State#state.atom_id) ++
+    get_issued_deleted_keys(State#state.atom_id).

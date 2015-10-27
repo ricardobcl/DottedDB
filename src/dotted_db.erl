@@ -12,6 +12,7 @@
          set_strip_interval2/1,
          set_kill_node_rate/1,
          set_kill_node_rate/2,
+         set_vnodes_stats/1,
          vstate/0,
          vstate/1,
          vstates/0,
@@ -132,6 +133,20 @@ restart() ->
                 _       -> dotted_db_utils:random_from_list(Vnodes)
             end,
             restart(IndexNode)
+    end.
+
+set_vnodes_stats(Bool) ->
+    {ok, RingBin} = riak_core_ring_manager:get_chash_bin(),
+    case chashbin:to_list(RingBin) of
+        [] ->
+            lager:warning("No vnodes to change strip interval, on node ~p", [node()]),
+            error;
+        Vnodes ->
+             riak_core_vnode_master:command(
+                        Vnodes,
+                        {set_stats, Bool},
+                        {raw, undefined, self()},
+                        dotted_db_vnode_master)
     end.
 
 restart(IndexNode) ->
@@ -672,17 +687,17 @@ color_good_if_zero(Message, Number) ->
             end
     end.
 
-process_vnode_state({Index, _Node, {ok, vs, {state, _Id, Index, NodeClock, _Storage,
+process_vnode_state({Index, _Node, {ok, vs, {state, _Id, _Atom, Index, NodeClock, _Storage,
          _Replicated, KeyLog, NSK, _NSKInterval, RKeys, _Updates_mem, _Dets, _Stats, _Syncs, _Mode, _ReportInterval}}}) ->
     % ?PRINT(NodeClock),
     MissingDots = [ miss_dots(Entry) || {_,Entry} <- NodeClock ],
-    {Keys, Size} = KeyLog,
-    % Now = os:timestamp(),
-    % Fun = fun ({PI, ToCounter, FromCounter, LastAttempt, LastExchange}) ->
-    %             {PI, ToCounter, FromCounter, timer:now_diff(Now, LastAttempt)/1000, timer:now_diff(Now, LastExchange)/1000}
-    %       end,
-    % Syncs2 = lists:map(Fun, Syncs),
-    {SizeNSK,LengthNSK1,LengthNSK2} = NSK,
+    {_,K} = KeyLog,
+    Keys = length(K),
+    Size = byte_size(term_to_binary(KeyLog)),
+    {Del,Wrt} = NSK,
+    SizeNSK = byte_size(term_to_binary(NSK)),
+    LengthNSK1 = length(Wrt),
+    LengthNSK2 = lists:sum([dict:size(Dict) || {_,Dict} <- Wrt]) + length(Del),
     LengthRKeys = case RKeys of
         [] -> 0;
         _  ->
