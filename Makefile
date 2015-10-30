@@ -1,51 +1,54 @@
-REBAR = $(shell pwd)/rebar
-.PHONY: deps
+REBAR3_URL=https://s3.amazonaws.com/rebar3/rebar3
 
-all: deps compile
+# If there is a rebar in the current directory, use it
+ifeq ($(wildcard rebar3),rebar3)
+REBAR3 = $(CURDIR)/rebar3
+endif
 
-compile:
-	$(REBAR) compile
+# Fallback to rebar on PATH
+REBAR3 ?= $(shell test -e `which rebar3` 2>/dev/null && which rebar3 || echo "./rebar3")
 
-deps:
-	$(REBAR) get-deps
+# And finally, prep to download rebar if all else fails
+ifeq ($(REBAR3),)
+REBAR3 = $(CURDIR)/rebar3
+endif
 
-compile-no-deps:
-	$(REBAR) compile skip_deps=true
+.PHONY: all
 
-test: compile
-	$(REBAR) eunit skip_deps=true
+all: $(REBAR3)
+	@$(REBAR3) do deps, compile
+
+rel: compile
+	@$(REBAR3) release -d false --overlay_vars config/vars.config
+
+rel_dev: compile
+	@$(REBAR3) release --overlay_vars config/vars.config
 
 clean:
-	$(REBAR) clean
+	@$(REBAR3) clean
 
-distclean: clean devclean relclean
-	$(REBAR) delete-deps
+compile:
+	@$(REBAR3) compile
 
-rel: all
-	$(REBAR) generate
+compile-no-deps:
+	@$(REBAR3) compile
 
-relclean:
-	rm -rf rel/dotted_db
+deps:
+	@$(REBAR3) deps
 
-xref: all
-	$(REBAR) skip_deps=true xref
+doc: compile
+	@$(REBAR3) edoc
 
-stage: rel
-	$(foreach dep,$(wildcard deps/*), rm -rf rel/dotted_db/lib/$(shell basename $(dep))-* && ln -sf $(abspath $(dep)) rel/dotted_db/lib;)
-	$(foreach app,$(wildcard apps/*), rm -rf rel/dotted_db/lib/$(shell basename $(app))-* && ln -sf $(abspath $(app)) rel/dotted_db/lib;)
+dialyzer: compile
+	@$(REBAR3) dialyzer
 
-##
-## Lock Targets
-##
-##  see https://github.com/seth/rebar_lock_deps_plugin
-lock: deps compile
-	./rebar lock-deps
+test: deps compile
+	@$(REBAR3) do eunit skip_deps=true, ct, dialyzer
 
-locked-all: locked-deps compile
 
-locked-deps:
-	@echo "Using rebar.config.lock file to fetch dependencies"
-	./rebar -C rebar.config.lock get-deps
+$(REBAR3):
+	curl -Lo rebar3 $(REBAR3_URL) || wget $(REBAR3_URL)
+	chmod a+x rebar3
 
 
 ##
@@ -59,7 +62,7 @@ locked-deps:
 ##  Example, make a 68 node devrel cluster
 ##    make stagedevrel DEVNODES=68
 
-.PHONY : stagedevrel devrel
+.PHONY : devrel
 DEVNODES ?= 4
 
 # 'seq' is not available on all *BSD, so using an alternate in awk
@@ -68,72 +71,11 @@ SEQ = $(shell awk 'BEGIN { for (i = 1; i < '$(DEVNODES)'; i++) printf("%i ", i);
 $(eval stagedevrel : $(foreach n,$(SEQ),stagedev$(n)))
 $(eval devrel : $(foreach n,$(SEQ),dev$(n)))
 
-dev% : all
-	mkdir -p dev
-	rel/gen_dev $@ rel/vars/dev_vars.config.src rel/vars/$@_vars.config
-	(cd rel && $(REBAR) generate target_dir=../dev/$@ overlay_vars=vars/$@_vars.config)
-
-stagedev% : dev%
-	  $(foreach dep,$(wildcard deps/*), rm -rf dev/$^/lib/$(shell basename $(dep))* && ln -sf $(abspath $(dep)) dev/$^/lib;)
-	  $(foreach app,$(wildcard apps/*), rm -rf dev/$^/lib/$(shell basename $(app))* && ln -sf $(abspath $(app)) dev/$^/lib;)
+dev% : devclean all
+	mkdir -p _build/dev/$@
+	config/gen_dev $@ config/vars/dev_vars.config.src config/vars/$@_vars.config
+	$(REBAR3) release -o _build/dev/$@ --overlay_vars config/vars/$@_vars.config
 
 devclean: clean
-	rm -rf dev
+	rm -rf _build/dev
 
-
-## Dialyzer
-
-DIALYZER_APPS = kernel stdlib sasl erts ssl tools os_mon runtime_tools crypto inets \
-	xmerl webtool eunit syntax_tools compiler public_key snmp
-
-
-PLT ?= $(PWD)/.combo_dialyzer_plt
-LOCAL_PLT = $(PWD)/.local_dialyzer_plt
-DIALYZER_FLAGS ?= -Wunmatched_returns -Werror_handling -Wrace_conditions -Wunderspecs
-
-${PLT}: compile-no-deps
-	@if [ -f $(PLT) ]; then \
-		dialyzer --check_plt --plt $(PLT) --apps $(DIALYZER_APPS) && \
-		dialyzer --add_to_plt --plt $(PLT) --output_plt $(PLT) --apps $(DIALYZER_APPS) ; test $$? -ne 1; \
-	else \
-		dialyzer --build_plt --output_plt $(PLT) --apps $(DIALYZER_APPS); test $$? -ne 1; \
-	fi
-
-${LOCAL_PLT}: compile-no-deps
-	@if [ -d deps ]; then \
-		if [ -f $(LOCAL_PLT) ]; then \
-			dialyzer --check_plt --plt $(LOCAL_PLT) deps/*/ebin ebin && \
-			dialyzer --add_to_plt --plt $(LOCAL_PLT) --output_plt $(LOCAL_PLT) deps/*/ebin ebin ; test $$? -ne 1; \
-		else \
-			dialyzer --build_plt --output_plt $(LOCAL_PLT) deps/*/ebin ebin ; test $$? -ne 1; \
-		fi \
-	fi
-
-dialyzer: ${PLT} ${LOCAL_PLT}
-	@echo "==> $(shell basename $(shell pwd)) (dialyzer)"
-	@if [ -f $(LOCAL_PLT) ]; then \
-		PLTS="$(PLT) $(LOCAL_PLT)"; \
-	else \
-		PLTS=$(PLT); \
-	fi; \
-	if [ -f dialyzer.ignore-warnings ]; then \
-		if [ $$(grep -cvE '[^[:space:]]' dialyzer.ignore-warnings) -ne 0 ]; then \
-			echo "ERROR: dialyzer.ignore-warnings contains a blank/empty line, this will match all messages!"; \
-			exit 1; \
-		fi; \
-		dialyzer $(DIALYZER_FLAGS) --plts $${PLTS} -c ebin > dialyzer_warnings ; \
-		egrep -v "^[[:space:]]*(done|Checking|Proceeding|Compiling)" dialyzer_warnings | grep -F -f dialyzer.ignore-warnings -v > dialyzer_unhandled_warnings ; \
-		cat dialyzer_unhandled_warnings ; \
-		[ $$(cat dialyzer_unhandled_warnings | wc -l) -eq 0 ] ; \
-	else \
-		dialyzer $(DIALYZER_FLAGS) --plts $${PLTS} -c ebin; \
-	fi
-
-cleanplt:
-	@echo
-	@echo "Are you sure?  It takes several minutes to re-build."
-	@echo Deleting $(PLT) and $(LOCAL_PLT) in 5 seconds.
-	@echo
-	sleep 5
-	rm $(PLT)
-	rm $(LOCAL_PLT)

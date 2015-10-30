@@ -2,7 +2,7 @@
 {application, dotted_db,
  [
   {description, "DottedDB:  a Distributed Key-Value Store with Global Logical Clocks"},
-  {vsn, "0.1.0"},
+  {vsn, "1.0.0"},
   {registered, []},
   {applications, [
                   kernel,

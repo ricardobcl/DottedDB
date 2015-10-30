@@ -1,16 +1,13 @@
 #! /bin/sh
 #
-# gen_dev dev4 vars.src vars
-#
 # Generate an overlay config for devNNN from vars.src and write to vars
+#
+# Ex: > gen_dev dev4 vars.src vars
 #
 
 NAME=$1
 TEMPLATE=$2
 VARFILE=$3
-
-## Allocate 10 ports per node
-##   .7 - http
 
 NUMBER=${NAME##dev}
 BASE=$((10000 + 10 * $NUMBER))

@@ -5,7 +5,7 @@ require 'fileutils'
 NUM_NODES = 4
 NUM_NODES_STR = "4"
 #RING_SIZE = 16
-BACKEND = 'leveldb' #options: bitcask, leveldb, memory.
+# BACKEND = 'leveldb' #options: bitcask, leveldb, memory.
 
 task :default => :help
 
@@ -15,25 +15,25 @@ end
 
 desc "counters # of errors lines in the dev cluster log"
 task :errors do
-  sh "cat dev/dev?/log/error.log dev/dev?/log/crash.log| wc -l" rescue "print errors error"
-  sh "cat dev/dev1/log/error.log dev/dev1/log/crash.log| wc -l" rescue "print errors error"
-  sh "cat dev/dev2/log/error.log dev/dev2/log/crash.log| wc -l" rescue "print errors error"
-  sh "cat dev/dev3/log/error.log dev/dev3/log/crash.log| wc -l" rescue "print errors error"
-  sh "cat dev/dev4/log/error.log dev/dev4/log/crash.log| wc -l" rescue "print errors error"
+  sh "cat _build/dev/dev?/dotted_db/log/error.log dev/dev?/log/crash.log| wc -l" rescue "print errors error"
+  sh "cat _build/dev/dev1/dotted_db/log/error.log dev/dev1/log/crash.log| wc -l" rescue "print errors error"
+  sh "cat _build/dev/dev2/dotted_db/log/error.log dev/dev2/log/crash.log| wc -l" rescue "print errors error"
+  sh "cat _build/dev/dev3/dotted_db/log/error.log dev/dev3/log/crash.log| wc -l" rescue "print errors error"
+  sh "cat _build/dev/dev4/dotted_db/log/error.log dev/dev4/log/crash.log| wc -l" rescue "print errors error"
 end
 
 desc "resets the logs"
 task :clean_errors do
   (1..NUM_NODES).each do |n|
-    sh %{rm -rf dev/dev#{n}/log/*}
-    sh "touch dev/dev#{n}/log/error.log dev/dev#{n}/log/crash.log" rescue "print clean error"
+    sh %{rm -rf _build/dev/dotted_db/dev#{n}/log/*}
+    sh "touch _build/dev/dev#{n}/dotted_db/log/error.log _build/dev/dev#{n}/dotted_db/log/crash.log" rescue "print clean error"
   end
 end
 
 desc "attach to a dottedDB console"
 task :attach, :node do |t, args|
   args.with_defaults(:node => 1)
-  sh %{dev/dev#{args.node}/bin/dotted_db attach} rescue "attach error"
+  sh %{_build/dev/dev#{args.node}/dotted_db/bin/dotted_db attach} rescue "attach error"
 end
 
 
@@ -57,7 +57,7 @@ end
 
 desc "make the dev dotted_db folders"
 task :build => :clear do
-  sh "make stagedevrel" rescue "build dev error"
+  sh "make devrel" rescue "build dev error"
 end
 
 desc "start all dotted_db nodes"
@@ -65,7 +65,7 @@ task :start do
   # (1..NUM_NODES).each do |n|
   #   sh %{dev/dev#{n}/bin/dotted_db start}
   # end
-  sh "for d in dev/dev*; do $d/bin/dotted_db start; done" rescue "not running"
+  sh "for d in _build/dev/dev*; do $d/dotted_db/bin/dotted_db start; done" rescue "not running"
   puts "========================================"
   puts "Dotted Dev Cluster started"
   puts "========================================"
@@ -75,38 +75,38 @@ desc "join dotted_db nodes (only needed once)"
 task :join do
   sleep(2)
   (2..NUM_NODES).each do |n|
-      sh %{dev/dev#{n}/bin/dotted_db-admin cluster join dotted_db1@127.0.0.1} rescue "already joined"
+      sh %{_build/dev/dev#{n}/dotted_db/bin/dotted_db-admin cluster join dotted_db1@127.0.0.1} rescue "already joined"
   end
-  sh %{dev/dev1/bin/dotted_db-admin cluster plan}
-  sh %{dev/dev1/bin/dotted_db-admin cluster commit}
+  sh %{_build/dev/dev1/dotted_db/bin/dotted_db-admin cluster plan}
+  sh %{_build/dev/dev1/dotted_db/bin/dotted_db-admin cluster commit}
 end
 
 desc "waits for cluster vnode converge to stabilize"
 task :converge do
   puts "waiting for cluster vnode reshuffling to converge"
   $stdout.sync = true
-  cmd = `dev/dev1/bin/dotted_db-admin member-status | grep "\ \-\-" | wc -l`
-  cmd = `dev/dev1/bin/dotted_db-admin member-status | grep "\ \-\-" | wc -l`
+  cmd = `_build/dev/dev1/dotted_db/bin/dotted_db-admin member-status | grep "\ \-\-" | wc -l`
+  # cmd = `dev/dev1/bin/dotted_db-admin member-status | grep "\ \-\-" | wc -l`
   counter = 1
   tries = 0
   continue = true
   while (cmd.strip != NUM_NODES_STR and continue)
     print "."
     sleep(1)
-    cmd = `dev/dev1/bin/dotted_db-admin member-status | grep "\ \-\-" | wc -l`
+    cmd = `_build/dev/dev1/dotted_db/bin/dotted_db-admin member-status | grep "\ \-\-" | wc -l`
     counter = counter + 1
     if counter > 5
       tries = tries + 1
       puts ""
       puts "Try # #{tries} of 20"
-      sh %{dev/dev1/bin/dotted_db-admin member-status}
+      sh %{_build/dev/dev1/dotted_db/bin/dotted_db-admin member-status}
       counter = 1
     end
     if tries > 39
       continue = false
     end
   end
-  sh %{dev/dev1/bin/dotted_db-admin member-status}
+  sh %{_build/dev/dev1/dotted_db/bin/dotted_db-admin member-status}
   if continue
     puts "READY SET GO!"
   else
@@ -116,7 +116,7 @@ end
 
 desc "dotted_db-admin member-status"
 task :member_status do
-  sh %{dev/dev1/bin/dotted_db-admin member-status}
+  sh %{_build/dev/dev1/dotted_db/bin/dotted_db-admin member-status}
 end
 
 desc "stop all dotted_db nodes"
@@ -124,7 +124,7 @@ task :stop do
   # (1..NUM_NODES).each do |n|
   #   sh %{dev/dev#{n}/bin/dotted_db stop} rescue "not running"
   # end
-  sh "for d in dev/dev*; do $d/bin/dotted_db stop; done" rescue "not running"
+  sh "for d in _build/dev/dev*; do $d/dotted_db/bin/dotted_db stop; done" rescue "not running"
   puts "========================================"
   puts "Dotted Dev Cluster stopped"
   puts "========================================"
@@ -139,32 +139,32 @@ task :restart_with_storage => [:stop, :compile, :start]
 desc "clear data from all dotted_db nodes"
   task :clear => :stop do
     (1..NUM_NODES).each do |n|
-      sh %{rm -rf dev/dev#{n}}
+      sh %{rm -rf _build/dev/dev#{n}}
   end
 end
 
 desc "ping all dotted_db nodes"
 task :ping do
   (1..NUM_NODES).each do |n|
-      sh %{dev/dev#{n}/bin/dotted_db ping}
+      sh %{_build/dev/dev#{n}/dotted_db/bin/dotted_db ping}
   end
 end
 
 desc "dotted_db-admin test"
 task :test do
   (1..NUM_NODES).each do |n|
-    sh %{dev/dev#{n}/bin/dotted_db-admin test}
+    sh %{_build/dev/dev#{n}/dotted_db/bin/dotted_db-admin test}
   end
 end
 
 desc "dotted_db-admin status"
 task :status do
-  sh %{dev/dev1/bin/dotted_db-admin  status}
+  sh %{_build/dev/dev1/dotted_db/bin/dotted_db-admin  status}
 end
 
 desc "dotted_db-admin ring-status"
 task :ring_status do
-  sh %{dev/dev1/bin/dotted_db-admin  ring-status}
+  sh %{_build/dev/dev1/dotted_db/bin/dotted_db-admin  ring-status}
 end
 
 desc "plot local dev nodes stats"
@@ -175,8 +175,8 @@ end
 desc "deletes the database storage to start from scratch"
 task :delete_storage do
   (1..NUM_NODES).each do |n|
-    sh %{rm -rf dev/dev#{n}/data/vnode_state}
-    sh %{rm -rf dev/dev#{n}/data/objects}
+    sh %{rm -rf _build/dev/dev#{n}/dotted_db/data/vnode_state}
+    sh %{rm -rf _build/dev/dev#{n}/dotted_db/data/objects}
     # sh %{rm -rf dev/dev#{n}/log}
   end
 end

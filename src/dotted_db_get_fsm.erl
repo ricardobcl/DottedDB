@@ -89,7 +89,7 @@ waiting({ok, ReqID, IndexNode, Response}, State=#state{
     %% Add the new response to Replies. If it's a not_found or an error, add an empty DCC.
     Replies2 =  case Response of
                     {ok, DCC}   -> [{IndexNode, DCC} | Replies];
-                    _           -> [{IndexNode, dcc:new()} | Replies]
+                    _           -> [{IndexNode, swc_kv:new()} | Replies]
                 end,
     NewState = State#state{replies = Replies2},
     % test if we have enough responses to respond to the client
@@ -115,7 +115,7 @@ waiting2({ok, ReqID, IndexNode, Response}, State=#state{
     %% Add the new response to Replies. If it's a not_found or an error, add an empty DCC.
     Replies2 =  case Response of
                     {ok, DCC}   -> [{IndexNode, DCC} | Replies];
-                    _           -> [{IndexNode, dcc:new()} | Replies]
+                    _           -> [{IndexNode, swc_kv:new()} | Replies]
                 end,
     NewState = State#state{replies = Replies2},
     case length(Replies2) >= Max of
@@ -161,22 +161,22 @@ read_repair(_BKey, Replies) ->
     _FinalDCC = final_dcc_from_replies(Replies),
     %% Computed what replicas have an outdated version of this key, and repair them.
     % [ dotted_db_vnode:repair([IndexNode], BKey, FinalDCC) ||
-    %     {IndexNode,DCC} <- Replies, not dcc:equal(DCC, FinalDCC)],
+    %     {IndexNode,DCC} <- Replies, not swc_kv:equal(DCC, FinalDCC)],
     ok.
 
 -spec final_dcc_from_replies([{index_node(), dcc()}]) -> dcc().
 final_dcc_from_replies(Replies) ->
     DCCs = [DCC || {_,DCC} <- Replies],
-    lists:foldl(fun dcc:sync/2, dcc:new(), DCCs).
+    lists:foldl(fun swc_kv:sync/2, swc_kv:new(), DCCs).
 
 create_client_reply(From, ReqID, _Replies, _ReturnValue = false) ->
     From ! {ReqID, ok, get, false};
 create_client_reply(From, ReqID, Replies, _ReturnValue = true) ->
     FinalDCC = final_dcc_from_replies(Replies),
-    Values = [V || V <- dcc:values(FinalDCC), V =/= ?DELETE_OP],
+    Values = [V || V <- swc_kv:values(FinalDCC), V =/= ?DELETE_OP],
     case Values =:= [] of
         true -> % no response found; return the context for possibly future writes
-            From ! {ReqID, not_found, get, dcc:context(FinalDCC)};
+            From ! {ReqID, not_found, get, swc_kv:context(FinalDCC)};
         false -> % there is at least on value for this key
-            From ! {ReqID, ok, get, {Values, dcc:context(FinalDCC)}}
+            From ! {ReqID, ok, get, {Values, swc_kv:context(FinalDCC)}}
     end.

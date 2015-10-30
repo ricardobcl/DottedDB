@@ -335,13 +335,13 @@ sanitize_options_get(Options) when is_list(Options) ->
 new(Key, Value) when not is_tuple(Key) ->
     new({?DEFAULT_BUCKET, Key}, Value);
 new(BKey={_Bucket, _Key}, Value) ->
-    put(BKey, Value, vv:new()).
+    put(BKey, Value, swc_vv:new()).
 
 %% @doc new/3 New key/value, with options.
 new(Key, Value, Options) when not is_tuple(Key) ->
     new({?DEFAULT_BUCKET, Key}, Value, Options);
 new(BKey={_Bucket, _Key}, Value, Options) ->
-    put(BKey, Value, vv:new(), Options).
+    put(BKey, Value, swc_vv:new(), Options).
 
 %% @doc put/3 Update key/value with context, but no options.
 put(Key, Value, Context) when not is_tuple(Key) ->
@@ -384,13 +384,13 @@ delete(BKey={_Bucket, _Key}, Context, Options) ->
 new_at_node(Key, Value, TargetNode) when not is_tuple(Key) ->
     new_at_node({?DEFAULT_BUCKET, Key}, Value, TargetNode);
 new_at_node(BKey={_Bucket, _Key}, Value, TargetNode) ->
-    put_at_node(BKey, Value, vv:new(), TargetNode).
+    put_at_node(BKey, Value, swc_vv:new(), TargetNode).
 
 %% @doc new_at_node/4 New key/value, with options.
 new_at_node(Key, Value, Options, TargetNode) when not is_tuple(Key) ->
     new_at_node({?DEFAULT_BUCKET, Key}, Value, Options, TargetNode);
 new_at_node(BKey={_Bucket, _Key}, Value, Options, TargetNode) ->
-    put_at_node(BKey, Value, vv:new(), Options, TargetNode).
+    put_at_node(BKey, Value, swc_vv:new(), Options, TargetNode).
 
 
 %% @doc put_at_node/4 Update key/value with context, but no options.
