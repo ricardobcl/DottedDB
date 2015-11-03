@@ -50,7 +50,8 @@ task :dev => [:build_dev, :start, :join, :converge]
 desc "compile the dotted_db source"
 task :compile do
   puts green " ========> Compiling!               "
-  print `./rebar3 compile`
+  print %x<./rebar3 compile>
+  raise red " ========> Failed Compilation!" unless $?.success?
 end
 
 desc "Make the dev dotted_db folders"
