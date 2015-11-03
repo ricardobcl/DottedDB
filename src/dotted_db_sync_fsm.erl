@@ -131,8 +131,12 @@ sync_repair_AB({ok, ReqID, IdA={_,_}, BaseClockA, _, MissingFromB},
 % lager:info("2WAY repair"),
     dotted_db_vnode:sync_repair( [NodeA], ReqID, IdB, BaseClockB, MissingFromA),
     dotted_db_vnode:sync_repair( [NodeB], ReqID, IdA, BaseClockA, MissingFromB),
-    {next_state, sync_ack, State, State#state.timeout}.
-
+    {next_state, sync_ack, State, State#state.timeout};
+sync_repair_AB({ok, ReqID, IdA1={_,_}, _, _, _},
+        State=#state{   req_id       = ReqID,
+                        id_a         = IdA2}) when IdA1 =/= IdA2 ->
+    State#state.from ! {ReqID, cancel, sync},
+    {stop, normal, State}.
 
 %% @doc
 sync_ack(timeout, State) ->
