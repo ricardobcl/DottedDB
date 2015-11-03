@@ -18,24 +18,17 @@ A prototype of a Dynamo-style distributed key-value database, implementing
 * Scalable logical clocks in case of high rate of node churn (nodes retiring / leaving):
     * Causality per key is automatically reduced to only living nodes as they are updated;
 
-## Benchmarks
-
-TODO
 
 ## Building
 
 ```shell
-rake all
+# Build normal release
+$ rake rel
+
+# Build 4 node dev cluster
+$ rake dev
 ```
 
-#### Normal release
+## Benchmarks
 
-```shell
-> rake rel
-```
-
-#### 4 node dev cluster
-
-```shell
-> rake dev
-```
+TODO
