@@ -1,7 +1,8 @@
 # DottedDB
 
 A prototype of a Dynamo-style distributed key-value database, implementing
-[Global Logical Clocks](https://github.com/ricardobcl/GlobalLogicalClocks) as the main causality mechanism across the system.
+[Server Wide Clocks](https://github.com/ricardobcl/ServerWideClocks) as the main
+causality mechanism across the system.
 
 ## Advantages
 
@@ -23,10 +24,10 @@ A prototype of a Dynamo-style distributed key-value database, implementing
 
 ```shell
 # Build normal release
-$ rake rel
+> rake rel
 
 # Build 4 node dev cluster
-$ rake dev
+> rake dev
 ```
 
 ## Benchmarks
