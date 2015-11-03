@@ -26,7 +26,7 @@ end
 desc "resets the logs"
 task :clean_errors do
   (1..NUM_NODES).each do |n|
-    `rm -rf _build/dev/dotted_db/dev#{n}/log/*`
+    `rm -rf _build/dev/dev#{n}/dotted_db/log/*`
     `touch _build/dev/dev#{n}/dotted_db/log/error.log _build/dev/dev#{n}/dotted_db/log/crash.log`
   end
   puts green " ========> Cleaned logs!             "
