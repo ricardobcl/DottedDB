@@ -74,15 +74,12 @@
         % what mode the vnode is on
         mode        :: normal | recovering,
         % interval time between reports on this vnode
-        report_interval :: non_neg_integer(),
-        % atom for accessing a temporary ETS for stripping keys
-        temp_atom_id :: atom()
+        report_interval :: non_neg_integer()
     }).
 
 -type state() :: #state{}.
 
 -define(MASTER, dotted_db_vnode_master).
--define(TEMP_ETS_NSK, temporary_ets_nsk).
 -define(UPDATE_LIMITE, 100). % save vnode state every 100 updates
 -define(VNODE_STATE_FILE, "dotted_db_vnode_state").
 -define(VNODE_STATE_KEY, "dotted_db_vnode_state_key").
@@ -202,7 +199,7 @@ init([Index]) ->
                 {S, NodeId2,NodeClock, KeyLog, Replicated, NonStrippedKeys}
         end,
     % create an ETS to store keys written and deleted in this node (for stats)
-    {AtomID, TempAtomID} = create_ets_all_keys(NodeId3),
+    AtomID = create_ets_all_keys(NodeId3),
     % schedule a periodic reporting message (wait 2 seconds initially)
     schedule_report(2000),
     % schedule a periodic strip of local keys
@@ -224,8 +221,7 @@ init([Index]) ->
         stats                   = application:get_env(dotted_db, do_stats, ?DEFAULT_DO_STATS),
         syncs                   = initialize_syncs(Index),
         mode                    = normal,
-        report_interval         = ?REPORT_TICK_INTERVAL,
-        temp_atom_id            = TempAtomID
+        report_interval         = ?REPORT_TICK_INTERVAL
         }
     }.
 
@@ -776,7 +772,7 @@ handle_restart({restart, ReqID}, State=#state{mode=normal}) ->
     NewReplicated = swc_vv:reset_with_same_ids(State#state.replicated),
     CurrentPeers = dotted_db_utils:peers(State#state.index),
     true = delete_ets_all_keys(State),
-    {NewAtomID, TempAtomID} = create_ets_all_keys(NewVnodeID),
+    NewAtomID = create_ets_all_keys(NewVnodeID),
     {ok, Storage1} = dotted_db_storage:drop(State#state.storage),
     ok = dotted_db_storage:close(Storage1),
     % open the storage backend for the key-values of this vnode
@@ -794,7 +790,6 @@ handle_restart({restart, ReqID}, State=#state{mode=normal}) ->
             storage             = NewStorage,
             syncs               = initialize_syncs(State#state.index),
             updates_mem         = 0,
-            temp_atom_id        = TempAtomID,
             mode                = recovering}}.
 
 %% On the good nodes
@@ -1212,8 +1207,10 @@ strip_save_batch([{Key={_,_}, DCC} | Objects], State, {NSK, StrippedObjects}, ET
 read_strip_write({Deletes, Writes}, State) ->
     {Stripped, NotStripped} = split_deletes(Deletes, State, {[],[]}),
     Deletes2 = strip_maybe_save_delete_batch(Stripped, State) ++ NotStripped,
-    Writes2 = compute_writes_NSK(Writes, State, []),
+    Writes2 = compute_writes_NSK(Writes, State, [], []),
     {Deletes2, Writes2}.
+
+%% Take care of NSK deletes
 
 split_deletes([], _State, Acc) -> Acc;
 split_deletes([{Key, Ctx} | Deletes], State, {Stripped, NotStripped}) ->
@@ -1271,31 +1268,42 @@ strip_maybe_save_delete_batch([{Key={_,_}, DCC} | Objects], State, {NSK, Strippe
     strip_maybe_save_delete_batch(Objects, State, Acc, ETS).
 
 
-compute_writes_NSK([], State, Acc) ->
-    write_stripped_keys_NSK(State),
-    Acc;
-compute_writes_NSK([{NodeID, Dict} |Tail], State, Acc) ->
-    NewDict = dict:filter(fun(_Dot, Key) -> dictFilterStripped(Key, State) end, Dict),
+%% Take care of NSK writes
+
+compute_writes_NSK([], State, Batch, NSK) ->
+    ok = dotted_db_storage:write_batch(State#state.storage, Batch),
+    NSK;
+compute_writes_NSK([{NodeID, Dict} |Tail], State, Batch, NSK) ->
+    {DelDots, SaveBatch} = dict:fold(fun(Dot, Key, Acc) -> dictNSK(Dot, Key, Acc, State) end, {[],[]}, Dict),
+    NewDict = remove_stripped_writes_NSK(DelDots, Dict),
     case dict:size(NewDict) of
-        0 -> compute_writes_NSK(Tail, State, Acc);
-        _ -> compute_writes_NSK(Tail, State, [{NodeID, NewDict}| Acc])
+        0 -> compute_writes_NSK(Tail, State, SaveBatch++Batch, NSK);
+        _ -> compute_writes_NSK(Tail, State, SaveBatch++Batch, [{NodeID, NewDict}| NSK])
     end.
 
-dictFilterStripped({Key, undefined}, State) ->
+dictNSK(Dot, {Key, undefined}, {Del, Batch}, State) ->
     case read_one_key(Key, State) of
-        0   -> ets:insert(State#state.atom_id, {Key, 1}), false;
-        DCC -> dictFilterStripped2({Key, DCC}, State, true)
+        0   ->
+            ets:insert(State#state.atom_id, {Key, 1}),
+            {[Dot|Del], Batch};
+        DCC ->
+            dictNSK2(Dot, {Key, DCC}, {Del,Batch}, State, true)
     end;
-dictFilterStripped({Key, Ctx}, State) ->
+dictNSK(Dot, {Key, Ctx}, {Del, Batch}, State) ->
     case strip_context(Ctx, State#state.clock) of
-        [] ->   case read_one_key(Key, State) of
-                    0   -> ets:insert(State#state.atom_id, {Key, 1}), false;
-                    DCC -> dictFilterStripped2({Key, DCC}, State, true)
-                end;
-        _ -> true %% not stripped yet; keep in the dict
+        [] ->
+            case read_one_key(Key, State) of
+                0 ->
+                    ets:insert(State#state.atom_id, {Key, 1}),
+                    {[Dot|Del], Batch};
+                DCC ->
+                    dictNSK2(Dot, {Key, DCC}, {Del,Batch}, State, true)
+            end;
+        _ -> 
+            {Del, Batch} %% not stripped yet; keep in the dict
     end.
 
-dictFilterStripped2({Key, DCC}, State, ETS) ->
+dictNSK2(Dot, {Key, DCC}, {Del, Batch}, State, ETS) ->
     % removed unnecessary causality from the DCC, based on the current node clock
     StrippedDCC = {Values, Context} = swc_kv:strip(DCC, State#state.clock),
     Values2 = [{D,V} || {D,V} <- Values, V =/= ?DELETE_OP],
@@ -1307,23 +1315,18 @@ dictFilterStripped2({Key, DCC}, State, ETS) ->
     case {Values2, Context} of
         {[],[]} -> % do the real delete
             ETS andalso ets:insert(State#state.atom_id, {Key, 1}),
-            ets:insert(State#state.temp_atom_id, {Key, delete}),
-            false;
+            {[Dot|Del], [{delete, Key}|Batch]};
         {_ ,[]} -> % write to disk without the version vector context
             ETS andalso ets:insert(State#state.atom_id, {Key, 3}),
-            ets:insert(State#state.temp_atom_id, {Key, {put, StrippedDCC}}),
-            false;
-        {_,_} -> true %% not stripped yet; keep in the dict
+            {[Dot|Del], [{put, Key, StrippedDCC}|Batch]};
+        {_,_} -> 
+            {Del, Batch} %% not stripped yet; keep in the dict
     end.
 
-write_stripped_keys_NSK(State) ->
-    FunCollect = fun ({Key, delete},     Acc) -> [{delete, Key}  |Acc];
-                     ({Key, {put, DCC}}, Acc) -> [{put, Key, DCC}|Acc]
-                 end,
-    Batch = ets:foldl(FunCollect, [], State#state.temp_atom_id),
-    ok = dotted_db_storage:write_batch(State#state.storage, Batch),
-    true = ets:delete_all_objects(State#state.temp_atom_id).
-
+remove_stripped_writes_NSK([], Dict) -> Dict;
+remove_stripped_writes_NSK([H|T], Dict) ->
+    NewDict = dict:erase(H, Dict),
+    remove_stripped_writes_NSK(T, NewDict).
 
 read_one_key(Key={_,_}, State) ->
     case dotted_db_storage:get(State#state.storage, Key) of
@@ -1437,20 +1440,15 @@ new_vnode_id(Index) ->
     % get a random index withing the length of the list
     {Index, random:uniform(999999999999)}.
 
-create_ets_all_keys(NewVnodeID={Index,_}) ->
+create_ets_all_keys(NewVnodeID) ->
     % create the ETS for this vnode
     AtomID = get_ets_id(NewVnodeID),
     _ = ((ets:info(AtomID) =:= undefined) andalso
             ets:new(AtomID, [named_table, public, set, {write_concurrency, false}])),
-    % create a temporary auxiliary ETS for stripping periodically keys
-    TempAtomID = get_ets_id({?TEMP_ETS_NSK, Index}),
-    _ = ((ets:info(TempAtomID) =:= undefined) andalso
-            ets:new(TempAtomID, [named_table, public, set, {write_concurrency, false}, {read_concurrency, false}])),
-    {AtomID, TempAtomID}.
+    AtomID.
 
-delete_ets_all_keys(#state{atom_id=AtomID, temp_atom_id=TempAtomID}) ->
+delete_ets_all_keys(#state{atom_id=AtomID}) ->
     _ = ((ets:info(AtomID) =:= undefined) andalso ets:delete(AtomID)),
-    _ = ((ets:info(TempAtomID) =:= undefined) andalso ets:delete(TempAtomID)),
     true.
 
 -spec get_ets_id(any()) -> atom().

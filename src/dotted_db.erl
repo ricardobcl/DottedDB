@@ -688,7 +688,7 @@ color_good_if_zero(Message, Number) ->
     end.
 
 process_vnode_state({Index, _Node, {ok, vs, {state, _Id, _Atom, Index, NodeClock, _Storage,
-         _Replicated, KeyLog, NSK, _NSKInterval, RKeys, _Updates_mem, _Dets, _Stats, _Syncs, _Mode, _ReportInterval, _TempAtom}}}) ->
+         _Replicated, KeyLog, NSK, _NSKInterval, RKeys, _Updates_mem, _Dets, _Stats, _Syncs, _Mode, _ReportInterval}}}) ->
     % ?PRINT(NodeClock),
     MissingDots = [ miss_dots(Entry) || {_,Entry} <- NodeClock ],
     {_,K} = KeyLog,
