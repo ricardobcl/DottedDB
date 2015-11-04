@@ -35,6 +35,7 @@
     base_clock_b    :: vv(),
     miss_from_a     :: [{key(),dcc()}],
     timeout         :: non_neg_integer(),
+    no_reply        :: boolean(),
     acks            :: non_neg_integer()
 }).
 
@@ -60,6 +61,7 @@ init([ReqID, Mode, From, NodeA]) ->
         node_a      = NodeA,
         node_b      = undefined,
         timeout     = ?DEFAULT_TIMEOUT * 20, % sync is much slower than PUTs/GETs,
+        no_reply    = ?DEFAULT_NO_REPLY,
         acks        = 0
     },
     {ok, sync_start_A, State, 0}.
@@ -83,7 +85,6 @@ sync_missing_B({ok, ReqID, IdA={_,_}, NodeB, EntryBInClockA},
     {next_state, sync_repair_AB, State#state{node_b=NodeB, id_a=IdA}, State#state.timeout};
 sync_missing_B({ok, ReqID, IdA={_,_}, NodeB, EntryBInClockA},
                             State=#state{ req_id = ReqID, mode = ?TWO_WAY}) ->
-% lager:info("2WAY missing B"),
     dotted_db_vnode:sync_missing([NodeB], ReqID, IdA, EntryBInClockA),
     {next_state, sync_missing_A, State#state{node_b=NodeB, id_a=IdA}, State#state.timeout}.
 
@@ -114,24 +115,39 @@ sync_repair_AB({cancel, ReqID, recovering}, State=#state{req_id = ReqID}) ->
     State#state.from ! {ReqID, cancel, sync},
     {stop, normal, State};
 sync_repair_AB({ok, ReqID, IdB={_,_}, BaseClockB, _, MissingFromA},
-        State=#state{   req_id  = ReqID,
-                        mode    = ?ONE_WAY,
-                        node_a  = NodeA}) ->
-    dotted_db_vnode:sync_repair( [NodeA], ReqID, IdB, BaseClockB, MissingFromA),
-    {next_state, sync_ack, State#state{id_b = IdB}, State#state.timeout};
+        State=#state{   req_id      = ReqID,
+                        mode        = ?ONE_WAY,
+                        no_reply    = NoReply,
+                        from        = From,
+                        node_a      = NodeA}) ->
+    dotted_db_vnode:sync_repair( [NodeA], {ReqID, IdB, BaseClockB, MissingFromA, NoReply}),
+    case NoReply of
+        true ->
+            From ! {ReqID, ok, sync},
+            {stop, normal, State#state{id_b = IdB}};
+        false ->
+            {next_state, sync_ack, State#state{id_b = IdB}, State#state.timeout}
+    end;
 sync_repair_AB({ok, ReqID, IdA={_,_}, BaseClockA, _, MissingFromB},
         State=#state{   req_id       = ReqID,
                         mode         = ?TWO_WAY,
+                        no_reply     = NoReply,
+                        from         = From,
                         node_a       = NodeA,
                         node_b       = NodeB,
                         id_a         = IdA,
                         id_b         = IdB,
                         base_clock_b = BaseClockB,
                         miss_from_a  = MissingFromA}) ->
-% lager:info("2WAY repair"),
-    dotted_db_vnode:sync_repair( [NodeA], ReqID, IdB, BaseClockB, MissingFromA),
-    dotted_db_vnode:sync_repair( [NodeB], ReqID, IdA, BaseClockA, MissingFromB),
-    {next_state, sync_ack, State, State#state.timeout};
+    dotted_db_vnode:sync_repair( [NodeA], {ReqID, IdB, BaseClockB, MissingFromA, NoReply}),
+    dotted_db_vnode:sync_repair( [NodeB], {ReqID, IdA, BaseClockA, MissingFromB, NoReply}),
+    case NoReply of
+        true ->
+            From ! {ReqID, ok, sync},
+            {stop, normal, State};
+        false ->
+            {next_state, sync_ack, State, State#state.timeout}
+    end;
 sync_repair_AB({ok, ReqID, IdA1={_,_}, _, _, _},
         State=#state{   req_id       = ReqID,
                         id_a         = IdA2}) when IdA1 =/= IdA2 ->

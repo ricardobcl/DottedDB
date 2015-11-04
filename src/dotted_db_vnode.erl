@@ -29,10 +29,10 @@
             read/3,
             repair/3,
             write/6,
-            replicate/4,
+            replicate/2,
             sync_start/2,
             sync_missing/4,
-            sync_repair/5
+            sync_repair/2
         ]).
 
 -ignore_xref([
@@ -139,9 +139,9 @@ write(Coordinator, ReqID, Op, Key, Value, Context) ->
                                    {fsm, undefined, self()},
                                    ?MASTER).
 
-replicate(ReplicaNodes, ReqID, Key, DCC) ->
+replicate(ReplicaNodes, Args) ->
     riak_core_vnode_master:command(ReplicaNodes,
-                                   {replicate, ReqID, Key, DCC},
+                                   {replicate, Args},
                                    {fsm, undefined, self()},
                                    ?MASTER).
 
@@ -157,9 +157,9 @@ sync_missing(Peer, ReqID, RemoteNodeID, RemoteEntry) ->
                                    {fsm, undefined, self()},
                                    ?MASTER).
 
-sync_repair(Node, ReqID, RemoteNodeID, RemoteNodeClockBase, MissingObjects) ->
+sync_repair(Node, Args) ->
     riak_core_vnode_master:command(Node,
-                                   {sync_repair, ReqID, RemoteNodeID, RemoteNodeClockBase, MissingObjects},
+                                   {sync_repair, Args},
                                    {fsm, undefined, self()},
                                    ?MASTER).
 
@@ -234,8 +234,8 @@ handle_command(Cmd={read, _ReqID, _Key}, _Sender, State) ->
     handle_read(Cmd, State);
 
 handle_command({repair, BKey, NewDCC}, Sender, State) ->
-    {reply, {ok, dummy_req_id}, State2} =
-        handle_command({replicate, dummy_req_id, BKey, NewDCC}, Sender, State),
+    {noreply, State2} =
+        handle_command({replicate, {dummy_req_id, BKey, NewDCC, ?DEFAULT_NO_REPLY}}, Sender, State),
     {noreply, State2};
 
 
@@ -246,7 +246,7 @@ handle_command({repair, BKey, NewDCC}, Sender, State) ->
 handle_command(Cmd={write, _ReqID, _Operation, _Key, _Value, _Context}, _Sender, State) ->
     handle_write(Cmd, State);
 
-handle_command(Cmd={replicate, _ReqID, _Key, _NewDCC}, _Sender, State) ->
+handle_command(Cmd={replicate, _Args}, _Sender, State) ->
     handle_replicate(Cmd, State);
 
 
@@ -260,7 +260,7 @@ handle_command(Cmd={sync_start, _ReqID}, _Sender, State) ->
 handle_command(Cmd={sync_missing, _ReqID, _RemoteID, _LocalEntryInRemoteClock}, _Sender, State) ->
     handle_sync_missing(Cmd, State);
 
-handle_command(Cmd={sync_repair, _ReqID, _RemoteNodeID, _RemoteClockBase, _MissingObjects}, _Sender, State) ->
+handle_command(Cmd={sync_repair, _Args}, _Sender, State) ->
     handle_sync_repair(Cmd, State);
 
 
@@ -465,7 +465,7 @@ handle_handoff_command(Cmd={write, ReqID, _, Key, _, _}, Sender, State) ->
     % send the ack to the PUT_FSM
     riak_core_vnode:reply(Sender, {ok, ReqID, NewDCC}),
     % create a new request to forward the replication of this new DCC/object
-    NewCommand = {replicate, ReqID, Key, NewDCC},
+    NewCommand = {replicate, {ReqID, Key, NewDCC, ?DEFAULT_NO_REPLY}},
     {forward, NewCommand, State2};
 
 %% Handle all other commands locally (only gets?)
@@ -500,7 +500,7 @@ handle_handoff_data(Data, State) ->
                 NodeClock2 = swc_node:join(NodeClock, State#state.clock),
                 State#state{clock = NodeClock2, keylog = KeyLog, replicated = Replicated, non_stripped_keys = NSK};
             {Key, Obj} ->
-                {reply, {ok, _}, State2} = handle_command({replicate, dummy_req_id, Key, Obj}, undefined, State),
+                {noreply, State2} = handle_command({replicate, {dummy_req_id, Key, Obj, ?DEFAULT_NO_REPLY}}, undefined, State),
                 State2
         end,
     {reply, ok, NewState}.
@@ -618,7 +618,7 @@ handle_write({write, ReqID, Operation, Key, Value, Context}, State) ->
         State#state{clock = NodeClock, keylog = KeyLog}}.
 
 
-handle_replicate({replicate, ReqID, Key, NewDCC}, State) ->
+handle_replicate({replicate, {ReqID, Key, NewDCC, NoReply}}, State) ->
     NodeClock = swc_kv:add(State#state.clock, NewDCC),
     % get and fill the causal history of the local key
     DiskDCC = guaranteed_get(Key, State),
@@ -643,8 +643,12 @@ handle_replicate({replicate, ReqID, Key, NewDCC}, State) ->
         true ->  ok;
         false -> ok
     end,
+    NewState = State#state{clock = NodeClock, non_stripped_keys = NSK},
     % return the updated node state
-    {reply, {ok, ReqID}, State#state{clock = NodeClock, non_stripped_keys = NSK}}.
+    case NoReply of
+        true  -> {noreply, NewState};
+        false -> {reply, {ok, ReqID}, NewState}
+    end.
 
 
 
@@ -716,9 +720,12 @@ handle_sync_missing({sync_missing, ReqID, RemoteID={_,_}, LocalEntryInRemoteCloc
                 StrippedObjects},
         State}.
 
-handle_sync_repair({sync_repair, ReqID, _, _, _}, State=#state{mode=recovering}) ->
-    {reply, {cancel, ReqID, recovering}, State};
-handle_sync_repair({sync_repair, ReqID, RemoteNodeID={_,_}, RemoteClockBase, MissingObjects}, State=#state{mode=normal}) ->
+handle_sync_repair({sync_repair, {ReqID, _, _, _, NoReply}}, State=#state{mode=recovering}) ->
+    case NoReply of
+        true  -> {noreply, State};
+        false -> {reply, {cancel, ReqID, recovering}, State}
+    end;
+handle_sync_repair({sync_repair, {ReqID, RemoteNodeID={_,_}, RemoteClockBase, MissingObjects, NoReply}}, State=#state{mode=normal}) ->
     NodeClock = sync_merge_clocks(RemoteNodeID, RemoteClockBase, State),
     % get the local objects corresponding to the received objects and fill the
     % causal history for all of them
@@ -753,7 +760,11 @@ handle_sync_repair({sync_repair, ReqID, RemoteNodeID={_,_}, RemoteClockBase, Mis
         false ->
             ok
     end,
-    {reply, {ok, ReqID}, State2}.
+    % return the updated node state
+    case NoReply of
+        true  -> {noreply, State2};
+        false -> {reply, {ok, ReqID}, State2}
+    end.
 
 
 

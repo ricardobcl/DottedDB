@@ -9,6 +9,7 @@
 -define(DEFAULT_BUCKET, <<"b">>).
 -define(DELETE_OP, delete_op).
 -define(WRITE_OP, write_op).
+-define(DEFAULT_NO_REPLY, true). % true if we don't care about Acks in FSMs
 
 %% Options for syncs.
 -define(DEFAULT_SYNC_INTERVAL, 100).
