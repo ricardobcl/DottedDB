@@ -1,4 +1,4 @@
 language: erlang
 otp_release:
    - 17.4
-script: "rake rel"
+script: "./rebar3 compile && ./rebar3 release"
