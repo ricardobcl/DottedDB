@@ -1,4 +1,4 @@
-# DottedDB
+# DottedDB [![Build Status](https://travis-ci.org/ricardobcl/DottedDB.svg?branch=master)](https://travis-ci.org/ricardobcl/DottedDB)
 
 A prototype of a Dynamo-style distributed key-value database, implementing
 [Server Wide Clocks](https://github.com/ricardobcl/ServerWideClocks) as the main
