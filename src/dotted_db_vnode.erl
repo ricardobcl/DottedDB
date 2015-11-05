@@ -1446,8 +1446,7 @@ is_replicated_vv_up_to_date(State) ->
 
 new_vnode_id(Index) ->
     % generate a new vnode ID for now
-    <<A:32, B:32, C:32>> = crypto:rand_bytes(12),
-    _ = random:seed({A,B,C}),
+    dotted_db_utils:maybe_seed(),
     % get a random index withing the length of the list
     {Index, random:uniform(999999999999)}.
 

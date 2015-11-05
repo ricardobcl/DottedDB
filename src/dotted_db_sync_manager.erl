@@ -94,8 +94,7 @@ handle_call({set_kill_node_interval, 0}, _From, State) ->
 handle_call({set_kill_node_interval, Interval}, _From, State) ->
     State#state.kill_timer =/= undefined andalso erlang:cancel_timer(State#state.kill_timer),
     % properly seeding the process
-    <<A:32, B:32, C:32>> = crypto:rand_bytes(12),
-    _ = random:seed({A,B,C}),
+    dotted_db_utils:maybe_seed(),
     %% randomize the first schedule, so that every machine is not killing nodes in-sync
     Interval2 = random:uniform(Interval),
     lager:info("Setting new kill_node: (random)> ~p (interval)> ~p", [Interval2, Interval]),

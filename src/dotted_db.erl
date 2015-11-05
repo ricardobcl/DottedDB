@@ -449,9 +449,8 @@ sanitize_options_put(Options) when is_list(Options) ->
     %% Unfolds all occurrences of atoms in Options to tuples {Atom, true}.
     Options1 = proplists:unfold(Options),
     %% Default number of replica nodes contacted to the replication factor.
-    <<A:32, B:32, C:32>> = crypto:rand_bytes(12),
-    _ = random:seed({A,B,C}),
     FailRate = proplists:get_value(?REPLICATION_FAIL_RATIO, Options1, ?DEFAULT_REPLICATION_FAIL_RATIO),
+    ok = dotted_db_utils:maybe_seed(),
     ReplicateXNodes = compute_real_replication_factor(FailRate, ?REPLICATION_FACTOR-1,?REPLICATION_FACTOR-1) + 1,
     % lager:debug("FailRate: ~p and ReplicateXNodes: ~p", [FailRate, ReplicateXNodes]),
     %% Default number of acks from replica nodes to 2.

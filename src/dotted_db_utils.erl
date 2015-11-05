@@ -70,8 +70,7 @@ peers(Index, N) ->
 -spec random_from_list([any(),...]) -> any().
 random_from_list(List) ->
     % properly seeding the process
-    <<A:32, B:32, C:32>> = crypto:rand_bytes(12),
-    _ = random:seed({A,B,C}),
+    maybe_seed(),
     % get a random index withing the length of the list
     Index = random:uniform(length(List)),
     % return the element in that index
@@ -81,8 +80,7 @@ random_from_list(List) ->
 -spec random_sublist([any()], non_neg_integer()) -> [any()].
 random_sublist(List, N) ->
     % Properly seeding the process.
-    <<A:32, B:32, C:32>> = crypto:rand_bytes(12),
-    _ = random:seed({A,B,C}),
+    maybe_seed(),
     % Assign a random value for each element in the list.
     List1 = [{random:uniform(), E} || E <- List],
     % Sort by the random number.
@@ -106,3 +104,15 @@ human_filesize(S, [_|[_|_] = L]) when S >= 1024 -> human_filesize(S/1024, L);
 human_filesize(S, [M|_]) ->
     lists:flatten(io_lib:format("~.2f ~s", [float(S), M])).
 
+
+-spec maybe_seed() -> ok.
+maybe_seed() ->
+    case get(random_seed) of
+        undefined ->
+            <<A:32, B:32, C:32>> = crypto:rand_bytes(12),
+            random:seed({A,B,C}), ok;
+        {X,X,X} ->
+            <<A:32, B:32, C:32>> = crypto:rand_bytes(12),
+            random:seed({A,B,C}), ok;
+        _ -> ok
+    end.
