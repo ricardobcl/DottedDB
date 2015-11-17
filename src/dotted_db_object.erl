@@ -22,7 +22,7 @@
 
 -record(object, {
     container   :: dcc(),
-    lastFSMtime :: erlang:timestamp()
+    lastFSMtime :: erlang:timestamp() | undefined
 }).
 
 -opaque object() :: #object{}.
@@ -53,11 +53,11 @@ get_container(Object) ->
 set_container(DCC, Object) ->
     Object#object{container = DCC}.
 
--spec get_fsm_time(object()) -> erlang:timestamp().
+-spec get_fsm_time(object()) -> erlang:timestamp() | undefined.
 get_fsm_time(Object) ->
     Object#object.lastFSMtime.
 
--spec set_fsm_time(erlang:timestamp(), object()) -> object().
+-spec set_fsm_time(erlang:timestamp() | undefined, object()) -> object().
 set_fsm_time(undefined, Object) ->
     Object;
 set_fsm_time(FSMtime, Object) ->

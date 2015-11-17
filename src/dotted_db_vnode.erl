@@ -1531,9 +1531,9 @@ ets_get_all_keys(State) ->
     % ets_get_issued_deleted(State#state.atom_id).
 
 ets_set_status(Id, Key, Status)     -> ensure_tuple(Id, Key), ets:update_element(Id, Key, {2, Status}).
-ets_set_strip_time(_, _, undefined) -> true;
+% ets_set_strip_time(_, _, undefined) -> true;
 ets_set_strip_time(Id, Key, Time)   -> ensure_tuple(Id, Key), ets:update_element(Id, Key, {3, Time}).
-ets_set_write_time(_, _, undefined) -> true;
+% ets_set_write_time(_, _, undefined) -> true;
 ets_set_write_time(Id, Key, Time)   -> ensure_tuple(Id, Key), ets:update_element(Id, Key, {4, Time}).
 ets_set_fsm_time(_, _, undefined)   -> true;
 ets_set_fsm_time(Id, Key, Time)     -> ensure_tuple(Id, Key), ets:update_element(Id, Key, {5, Time}).
