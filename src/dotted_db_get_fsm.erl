@@ -32,8 +32,8 @@
     do_rr       :: boolean(),
     %% Return the final value or not
     return_val  :: boolean(),
-    %% The current DCC to return.
-    replies     :: [{index_node(), dcc()}],
+    %% The current Object to return.
+    replies     :: [{index_node(), dotted_db_object:object()}],
     %% The timeout value for this request.
     timeout     :: non_neg_integer()
 }).
@@ -86,10 +86,10 @@ waiting({ok, ReqID, IndexNode, Response}, State=#state{
                                                 return_val  = ReturnValue,
                                                 min_acks    = Min,
                                                 max_acks    = Max}) ->
-    %% Add the new response to Replies. If it's a not_found or an error, add an empty DCC.
+    %% Add the new response to Replies. If it's a not_found or an error, add an empty Object.
     Replies2 =  case Response of
-                    {ok, DCC}   -> [{IndexNode, DCC} | Replies];
-                    _           -> [{IndexNode, swc_kv:new()} | Replies]
+                    {ok, Object} -> [{IndexNode, Object} | Replies];
+                    _            -> [{IndexNode, dotted_db_object:new()} | Replies]
                 end,
     NewState = State#state{replies = Replies2},
     % test if we have enough responses to respond to the client
@@ -112,10 +112,10 @@ waiting2({ok, ReqID, IndexNode, Response}, State=#state{
                                                 req_id      = ReqID,
                                                 max_acks    = Max,
                                                 replies     = Replies}) ->
-    %% Add the new response to Replies. If it's a not_found or an error, add an empty DCC.
+    %% Add the new response to Replies. If it's a not_found or an error, add an empty object.
     Replies2 =  case Response of
-                    {ok, DCC}   -> [{IndexNode, DCC} | Replies];
-                    _           -> [{IndexNode, swc_kv:new()} | Replies]
+                    {ok, Object}    -> [{IndexNode, Object} | Replies];
+                    _               -> [{IndexNode, dotted_db_object:new()} | Replies]
                 end,
     NewState = State#state{replies = Replies2},
     case length(Replies2) >= Max of
@@ -155,28 +155,28 @@ terminate(_Reason, _SN, _SD) ->
 %%% Internal Functions
 %%%===================================================================
 
--spec read_repair(bkey(), [{index_node(), dcc()}]) -> ok.
+-spec read_repair(bkey(), [{index_node(), dotted_db_object:object()}]) -> ok.
 read_repair(_BKey, Replies) ->
-    %% Compute the final DCC.
-    _FinalDCC = final_dcc_from_replies(Replies),
+    %% Compute the final Object.
+    _FinalObj = final_obj_from_replies(Replies),
     %% Computed what replicas have an outdated version of this key, and repair them.
-    % [ dotted_db_vnode:repair([IndexNode], BKey, FinalDCC) ||
-    %     {IndexNode,DCC} <- Replies, not swc_kv:equal(DCC, FinalDCC)],
+    % [ dotted_db_vnode:repair([IndexNode], BKey, FinalObj) ||
+    %     {IndexNode, Obj} <- Replies, not dotted_db_object:equal(Obj, FinalObj)],
     ok.
 
--spec final_dcc_from_replies([{index_node(), dcc()}]) -> dcc().
-final_dcc_from_replies(Replies) ->
-    DCCs = [DCC || {_,DCC} <- Replies],
-    lists:foldl(fun swc_kv:sync/2, swc_kv:new(), DCCs).
+-spec final_obj_from_replies([{index_node(), dotted_db_object:object()}]) -> dotted_db_object:object().
+final_obj_from_replies(Replies) ->
+    Objs = [Obj || {_,Obj} <- Replies],
+    lists:foldl(fun dotted_db_object:sync/2, dotted_db_object:new(), Objs).
 
 create_client_reply(From, ReqID, _Replies, _ReturnValue = false) ->
     From ! {ReqID, ok, get, false};
 create_client_reply(From, ReqID, Replies, _ReturnValue = true) ->
-    FinalDCC = final_dcc_from_replies(Replies),
-    Values = [V || V <- swc_kv:values(FinalDCC), V =/= ?DELETE_OP],
+    FinalObj = final_obj_from_replies(Replies),
+    Values = [V || V <- dotted_db_object:get_values(FinalObj), V =/= ?DELETE_OP],
     case Values =:= [] of
         true -> % no response found; return the context for possibly future writes
-            From ! {ReqID, not_found, get, swc_kv:context(FinalDCC)};
+            From ! {ReqID, not_found, get, dotted_db_object:get_context(FinalObj)};
         false -> % there is at least on value for this key
-            From ! {ReqID, ok, get, {Values, swc_kv:context(FinalDCC)}}
+            From ! {ReqID, ok, get, {Values, dotted_db_object:get_context(FinalObj)}}
     end.

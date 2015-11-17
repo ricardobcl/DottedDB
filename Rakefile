@@ -83,7 +83,7 @@ end
 
 desc "join dotted_db nodes (only needed once)"
 task :join do
-  sleep(2)
+  sleep(4)
   (2..NUM_NODES).each do |n|
       print yellow `_build/dev/dev#{n}/dotted_db/bin/dotted_db-admin cluster join dotted_db1@127.0.0.1`
   end

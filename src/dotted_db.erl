@@ -16,6 +16,9 @@
          vstate/0,
          vstate/1,
          vstates/0,
+         check_consistency/0,
+         strip_latencies/0,
+         replication_latencies/0,
          actual_deletes/0,
          issued_deletes/0,
          written_keys/0,
@@ -203,6 +206,25 @@ vstates() ->
     {ok, _} = dotted_db_coverage_fsm_sup:start_coverage_fsm(Request),
     wait_for_reqid(ReqID, ?DEFAULT_TIMEOUT).
 
+%% @doc
+check_consistency() ->
+    ReqID = dotted_db_utils:make_request_id(),
+    Request = [ReqID, self(), all_current_dots, ?DEFAULT_TIMEOUT],
+    {ok, _} = dotted_db_coverage_fsm_sup:start_coverage_fsm(Request),
+    wait_for_reqid(ReqID, ?DEFAULT_TIMEOUT).
+
+%% @doc
+strip_latencies() ->
+    ReqID = dotted_db_utils:make_request_id(),
+    Request = [ReqID, self(), strip_latency, ?DEFAULT_TIMEOUT],
+    {ok, _} = dotted_db_coverage_fsm_sup:start_coverage_fsm(Request),
+    wait_for_reqid(ReqID, ?DEFAULT_TIMEOUT).
+
+replication_latencies() ->
+    ReqID = dotted_db_utils:make_request_id(),
+    Request = [ReqID, self(), replication_latency, ?DEFAULT_TIMEOUT],
+    {ok, _} = dotted_db_coverage_fsm_sup:start_coverage_fsm(Request),
+    wait_for_reqid(ReqID, ?DEFAULT_TIMEOUT).
 
 %% @doc
 actual_deletes() ->
@@ -597,12 +619,14 @@ decode_get_reply({BinValues, Context}) ->
 
 process_coverage_commands(Response=[{_,_,{ok, vs, _}}|_]) ->
     process_vnode_states(Response);
+
 process_coverage_commands(Response=[{_,_,{ok, adk, _}}|_]) ->
     Keys0 = lists:flatten([ K || {_,_,{ok, adk, K}} <- Response]),
     Keys = sets:to_list(sets:from_list(Keys0)),
     Len = length(Keys),
     io:format("\========= Actual Deleted ==========   \n"),
     io:format("Length:\t ~p\n",[Len]);
+
 process_coverage_commands(Response=[{_,_,{ok, idk, _, _, _}}|_]) ->
     Keys0 = lists:flatten([ K || {_,_,{ok, idk, K, _, _}} <- Response]),
     Keys = sets:to_list(sets:from_list(Keys0)),
@@ -619,12 +643,14 @@ process_coverage_commands(Response=[{_,_,{ok, idk, _, _, _}}|_]) ->
             io:format("~s~s\n",color_good_if_zero(" Length: \t ", Len)),
             ok
     end;
+
 process_coverage_commands(Response=[{_,_,{ok, fwk, _}}|_]) ->
     Keys0 = lists:flatten([ K || {_,_,{ok, fwk, K}} <- Response]),
     Keys = sets:to_list(sets:from_list(Keys0)),
     Len = length(Keys),
     io:format("========= Keys Written w/o CC ==========   \n"),
     io:format("Length:\t ~p\n",[Len]);
+
 process_coverage_commands(Response=[{_,_,{ok, wk, _, _, _}}|_]) ->
     Keys0 = lists:flatten([ K || {_,_,{ok, wk, K, _, _}} <- Response]),
     Keys = sets:to_list(sets:from_list(Keys0)),
@@ -640,7 +666,51 @@ process_coverage_commands(Response=[{_,_,{ok, wk, _, _, _}}|_]) ->
         false ->
             io:format("~s~s\n",color_good_if_zero(" Length: \t ", Len)),
             ok
-    end.
+    end;
+
+process_coverage_commands(Response=[{_,_,{ok, strip_latency, _}}|_]) ->
+    Lats = lists:flatten([ L || {_,_,{ok, strip_latency, L}} <- Response]),
+    io:format("========= Strip Latency ==========   \n"),
+    io:format("Strip Latency average:\t ~p\n",[average(Lats)]),
+    case length(Lats) > 0 of
+        true -> io:format("Strip Latency max:\t ~p\n",[lists:max(Lats)]);
+        false -> ok
+    end;
+
+process_coverage_commands(Response=[{_,_,{ok, replication_latency, _}}|_]) ->
+    Lats = lists:flatten([ L || {_,_,{ok, replication_latency, L}} <- Response]),
+    io:format("========= Replication Latency ==========   \n"),
+    io:format("Replication Latency average:\t ~p\n",[average(Lats)]),
+    case length(Lats) > 0 of
+        true -> io:format("Replication Latency max:\t ~p\n",[lists:max(Lats)]);
+        false -> ok
+    end;
+
+process_coverage_commands(Response=[{_,_,{ok, all_current_dots, _}}|_]) ->
+    LWDots = [ length(W) || {_,_,{ok, all_current_dots, {W,_}}} <- Response],
+    LDDots = [ length(D) || {_,_,{ok, all_current_dots, {_,D}}} <- Response],
+    WDots = lists:flatten([ W || {_,_,{ok, all_current_dots, {W,_}}} <- Response]),
+    DDots = lists:flatten([ D || {_,_,{ok, all_current_dots, {_,D}}} <- Response]),
+    WDotsUSort = lists:usort(WDots),
+    DDotsUSort = lists:usort(DDots),
+    io:format("========= Consistency Check ==========   \n"),
+    io:format("Writes:  Length Dots    :\t ~p\n",[LWDots]),
+    io:format("Writes:  Dots       Len :\t ~p\n",[length(WDots)]),
+    io:format("Writes:  Dots Usort Len :\t ~p\n",[length(WDotsUSort)]),
+    io:format("Deletes: Length Dots    :\t ~p\n",[LDDots]),
+    io:format("Deletes: Dots       Len :\t ~p\n",[length(DDots)]),
+    io:format("Deletes: Dots Usort Len :\t ~p\n",[length(DDotsUSort)]),
+    case length(WDots) == ?REPLICATION_FACTOR * length(WDotsUSort) of
+        true  -> io:format("\t~s~s\n",[color:on_green("Writes GOOD!  Total: "),color:on_green(integer_to_list(length(WDotsUSort)))]);
+        false -> io:format("\t~s~s\n",[color:on_red("Writes BAD!  Total: "),color:on_red(integer_to_list(length(WDotsUSort)))])
+    end,
+    case length(DDots) == ?REPLICATION_FACTOR * length(DDotsUSort) of
+        true  -> io:format("\t~s~s\n",[color:on_green("Deletes GOOD!  Total: "),color:on_green(integer_to_list(length(DDotsUSort)))]);
+        false -> io:format("\t~s~s\n",[color:on_red("Deletes Meh!  Total: "),color:on_yellow(integer_to_list(length(DDotsUSort)))])
+    end,
+    % io:format("All Writes Dots: ~p\n",[[ W || {_,_,{ok, all_current_dots, {W,_}}} <- Response]]),
+    % io:format("All Deletes Dots: ~p\n",[[ D || {_,_,{ok, all_current_dots, {_,D}}} <- Response]]),
+    ok.
 
 process_vnode_states(States) ->
     Results         = [ process_vnode_state(State) || State <- States ],
@@ -731,9 +801,5 @@ values_aux(N,B,L) ->
         1 -> values_aux(M, B bsr 1, [ M | L ])
     end.
 
-average(X) ->
-    average(X, 0, 0).
-average([H|T], Length, Sum) ->
-    average(T, Length + 1, Sum + H);
-average([], Length, Sum) ->
-    Sum / max(1,Length).
+average(L) ->
+    lists:sum(L) / max(1,length(L)).

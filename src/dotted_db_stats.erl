@@ -7,6 +7,7 @@
 -export([     start_link/0
             , start_link/1
             , add_stats/1
+            , add_stats/2
             , notify/2
             , start/0
             , stop/0
@@ -46,7 +47,10 @@ start_link(Stats) ->
 
 %% @doc Dynamically adds a list of stats {Type, Name}
 add_stats(NewStats) ->
-    gen_server:call(?MODULE, {add_stats, NewStats}).
+    add_stats(NewStats, "").
+%% @doc Dynamically adds a list of stats {Type, Name} with Optional header for csv's
+add_stats(NewStats, OptionalHeader) ->
+    gen_server:call(?MODULE, {add_stats, NewStats, OptionalHeader}).
 
 notify(Name, 0.0) -> notify(Name, 0);
 notify(Name, Value) ->
@@ -77,7 +81,7 @@ init([Stats]) ->
 
     %% Create the stats directory and setups the output file handles for dumping
     %% periodic CSV of histogram results.
-    _ = init_histogram_files(Stats, true),
+    _ = init_stat_files(Stats, "", true),
     %% Register each new stat with folsom.
     _ = [create_stat_folsom(Stat) || Stat <- Stats],
 
@@ -104,17 +108,17 @@ handle_call(stop, _From, State) ->
                                 timer = undefined,
                                 active = false}};
 
-handle_call({add_stats, NewStats}, _From, State = #state{stats = CurrentStats}) ->
+handle_call({add_stats, NewStats, OptionalHeader}, _From, State = #state{stats = CurrentStats}) ->
     %% Create the stats directory and setups the output file handles for dumping
     %% periodic CSV of histogram results.
-    _ = init_histogram_files(NewStats),
+    _ = init_stat_files(NewStats, OptionalHeader),
     %% Register each new stat with folsom.
     _ = [create_stat_folsom(Stat) || Stat <- NewStats],
     {reply, ok, State#state{stats = CurrentStats ++ NewStats}};
 
 handle_call(new_dir, _From, State) ->
     %% Create a new folder for stats and point ?CURRENT_DIR to it.
-    _ = init_histogram_files(State#state.stats, true),
+    _ = init_stat_files(State#state.stats, "", true),
     {reply, ok, State}.
 
 
@@ -123,7 +127,7 @@ handle_call(new_dir, _From, State) ->
 
 %% Ignore notifications if active flag is set to false.
 handle_cast({notify,_,_}, State=#state{active = false}) ->
-    lager:debug("Stats: ignored notification!"),
+    lager:info("Stats: ignored notification!"),
     {noreply, State};
 
 handle_cast({notify, {histogram, Name}, Value}, State = #state{
@@ -132,7 +136,7 @@ handle_cast({notify, {histogram, Name}, Value}, State = #state{
                             timer = Timer,
                             active = true}) ->
     Now = os:timestamp(),
-    TimeSinceLastReport = timer:now_diff(Now, LWT) / 1000, %% To get the diff in seconds
+    TimeSinceLastReport = timer:now_diff(Now, LWT) / 1000, %% To get the diff in milliseconds
     TimeSinceLastWarn = timer:now_diff(Now, State#state.last_warn) / 1000,
     NewState = case TimeSinceLastReport > (FI * 2) andalso TimeSinceLastWarn > ?WARN_INTERVAL of
         true ->
@@ -154,7 +158,18 @@ handle_cast({notify, {histogram, Name}, Value}, State = #state{
 
 handle_cast({notify, {counter, Name}, Value}, State = #state{active = true}) ->
     ok = folsom_metrics:notify({counter, Name}, {inc, Value}),
+    {noreply, State};
+
+handle_cast({notify, {gauge, Name}, Value}, State = #state{active = true}) ->
+    % Values = folsom_metrics:get_metric_value({gauge, StatName}),
+    List = case ets:lookup(stats_gauge, Name) of
+        [] -> [];
+        [{Name, L}] -> L
+    end,
+    ets:insert(stats_gauge, {Name, [Value | List]}),
+    % ok = folsom_metrics:notify({gauge, Name}, Value),
     {noreply, State}.
+
 
 
 handle_info(flush, State) ->
@@ -167,6 +182,7 @@ terminate(_Reason, State) ->
     %% Do the final stats report
     _ = process_stats(os:timestamp(), State),
     [ok = file:close(F) || {{csv_file, _}, F} <- erlang:get()],
+    [ok = file:close(F) || {{cdf_file, _}, F} <- erlang:get()],
     ok.
 
 code_change(_OldVsn, State, _Extra) ->
@@ -193,14 +209,15 @@ process_stats(Now, State) ->
     [begin
          OpAmount = save_histogram(Elapsed, Window, Stat),
          folsom_metrics:notify({units, Stat}, {dec, OpAmount})
-     end || {histogram, Stat} <- State#state.stats].
+     end || {histogram, Stat} <- State#state.stats],
+    [save_gauge(Stat) || {gauge, Stat} <- State#state.stats].
 
 
 %% @doc Write measurement info for a given op to the appropriate CSV. Returns
 %% the number of successful and failed stats in this window of time.
-save_histogram(Elapsed, Window, Op) ->
-    Stats = folsom_metrics:get_histogram_statistics({histogram, Op}),
-    Units = folsom_metrics:get_metric_value({units, Op}),
+save_histogram(Elapsed, Window, StatName) ->
+    Stats = folsom_metrics:get_histogram_statistics({histogram, StatName}),
+    Units = folsom_metrics:get_metric_value({units, StatName}),
     case proplists:get_value(n, Stats) > 0 of
         true ->
             P = proplists:get_value(percentile, Stats),
@@ -217,13 +234,24 @@ save_histogram(Elapsed, Window, Op) ->
                                   proplists:get_value(max, Stats),
                                   0]);
         false ->
-            lager:debug("No data for op: ~p\n", [Op]),
+            lager:debug("No data for stat: ~p\n", [StatName]),
             Line = io_lib:format("~w, ~w, 0, 0, 0, 0, 0, 0, 0, 0, 0\n",
                                  [Elapsed,
                                   Window])
     end,
-    ok = file:write(erlang:get({csv_file, Op}), Line),
+    ok = file:write(erlang:get({csv_file, StatName}), Line),
     Units.
+
+save_gauge(StatName) ->
+    % Values = folsom_metrics:get_metric_value({gauge, StatName}),
+    ok = case ets:lookup(stats_gauge, StatName) of
+        [] -> ok;
+        [{StatName, Values}] ->
+            ets:delete(stats_gauge, StatName),
+            % lager:info("~p: |~p| \n",[StatName, Values]),
+            Line = lists:foldl(fun(X,Acc) -> Acc++io_lib:format("~w\n", [X]) end, [], Values),
+            file:write(erlang:get({cdf_file, StatName}), Line)
+    end.
 
 create_new_dir() ->
     TestDir = get_stats_dir(new_dir_name()),
@@ -251,8 +279,10 @@ new_dir_name() ->
 
 
 %% @doc Create a stat with folsom
-% create_stat_folsom(Name, spiral) ->
-%     folsom_metrics:new_spiral({spiral, Name});
+create_stat_folsom({gauge, _Name}) ->
+    % ok = folsom_metrics:new_gauge({gauge, Name});
+    (ets:info(stats_gauge) =:= undefined) andalso
+        ets:new(stats_gauge, [named_table, public, set, {write_concurrency, true}]);
 create_stat_folsom({counter, Name}) ->
     ok = folsom_metrics:new_counter({counter, Name});
 create_stat_folsom({histogram, Name}) ->
@@ -261,23 +291,33 @@ create_stat_folsom({histogram, Name}) ->
 
 %% @doc Create the stats directory and setups the output file handles for dumping
 %% periodic CSV of histogram results.
-init_histogram_files(Stats) ->
-    init_histogram_files(Stats, false).
-init_histogram_files(Stats, NewDir) ->
+init_stat_files(Stats, Header) ->
+    init_stat_files(Stats, Header, false).
+init_stat_files(Stats, Header, NewDir) ->
     TestDir = get_stats_dir(?CURRENT_DIR),
     _ = case (not filelib:is_dir(TestDir)) orelse NewDir of
         true -> create_new_dir();
         false -> ok
     end,
     %% Setup output file handles for dumping periodic CSV of histogram results.
-    [erlang:put({csv_file, Name}, histogram_csv_file(Name,TestDir)) || {histogram, Name} <- Stats].
+    [erlang:put({csv_file, Name}, histogram_csv_file(Name,TestDir,Header)) || {histogram, Name} <- Stats],
+    %% Setup output file handles for dumping gauge value for the CDF (Cumulative distribution function).
+    [erlang:put({cdf_file, Name}, gauge_cdf_file(Name,TestDir,Header))     || {gauge, Name} <- Stats].
 
 %% @doc Setups a histogram file for a stat.
-histogram_csv_file(Label, Dir) ->
+histogram_csv_file(Label, Dir, Header) ->
     Fname = normalize_label(Label) ++ "_hist.csv",
     Fname2 = filename:join([Dir, Fname]),
     {ok, F} = file:open(Fname2, [raw, binary, write]),
-    ok = file:write(F, <<"elapsed, window, n, min, mean, median, 95th, 99th, 99_9th, max, errors\n">>),
+    ok = file:write(F, list_to_binary("elapsed, window, n, min, mean, median, 95th, 99th, 99_9th, max, errors ## "++Header++"\n")),
+    F.
+
+%% @doc Setups a csv file for a gauges.
+gauge_cdf_file(Label, Dir, Header) ->
+    Fname = normalize_label(Label) ++ "_gauge.csv",
+    Fname2 = filename:join([Dir, Fname]),
+    {ok, F} = file:open(Fname2, [raw, binary, write]),
+    ok = file:write(F, list_to_binary("gauge ## "++Header++"\n")),
     F.
 
 normalize_label(Label) when is_list(Label) ->

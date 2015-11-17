@@ -42,6 +42,8 @@
     timeout         :: non_neg_integer(),
     %% True if we don't care about Acks in FSMs
     no_reply        :: boolean(),
+    %% Start of the FSM
+    start_time      :: erlang:timestamp(),
     %% The options proplist.
     options         :: list() % proplist()
 }).
@@ -87,6 +89,7 @@ init([ReqID, From, BKey, Value, Context, Options]) ->
         completed   = false,
         timeout     = proplists:get_value(?OPT_TIMEOUT, Options, ?DEFAULT_TIMEOUT),
         no_reply    = proplists:get_value(?OPT_TIMEOUT, Options, ?DEFAULT_NO_REPLY),
+        start_time  = os:timestamp(),
         options     = Options
     },
     {ok, prepare, SD, 0}.
@@ -122,8 +125,9 @@ write(timeout, State=#state{req_id      = ReqID,
                             operation   = Operation,
                             key         = Key,
                             value       = Value,
+                            start_time  = StartTime,
                             context     = Context}) ->
-    dotted_db_vnode:write(Coordinator, ReqID, Operation, Key, Value, Context),
+    dotted_db_vnode:write(Coordinator, {ReqID, Operation, Key, Value, Context, StartTime}),
     {next_state, waiting_coordinator, State}.
 
 %% @doc Coordinator writes the value.
@@ -132,7 +136,8 @@ waiting_coordinator(timeout, State=#state{ req_id = ReqID, from = From }) ->
     lager:warning("Coordinator timeout!!"),
     From ! {ReqID, timeout},
     {stop, timeout, State};
-waiting_coordinator({ok, ReqID, DCC}, State=#state{ req_id      = ReqID,
+waiting_coordinator({ok, ReqID, Object}, State=#state{
+                                                    req_id      = ReqID,
                                                     coordinator = Coordinator,
                                                     from        = From,
                                                     key         = BKey,
@@ -149,7 +154,7 @@ waiting_coordinator({ok, ReqID, DCC}, State=#state{ req_id      = ReqID,
         false ->  %% Else, replicate to the remaining number of replica nodes, according to `Replication`
             Replicas2 = dotted_db_utils:random_sublist(Replicas -- Coordinator, Replication - 1),
             lager:debug("PUT FSM: I'm replicating to ~p replica nodes in total.", [length(Replicas2) + 1]),
-            dotted_db_vnode:replicate(Replicas2, {ReqID, BKey, DCC, NoReply}),
+            dotted_db_vnode:replicate(Replicas2, {ReqID, BKey, Object, NoReply}),
             case NoReply of
                 true ->
                     From ! {ReqID, ok, update},

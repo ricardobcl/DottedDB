@@ -69,8 +69,21 @@ start(_StartType, _StartArgs) ->
                 % number of (non-stripped) write requests
                 {histogram, write_incomplete},
                 % number of stripped write in the server
-                {histogram, write_completed}
-            ]),
+                {histogram, write_completed},
+                % gauge, point-in-time single value measure of replication latency
+                {gauge, write_latency},
+                % gauge, point-in-time single value measure of strip latency for writes
+                {gauge, strip_write_latency},
+                % gauge, point-in-time single value measure of strip latency for deletes
+                {gauge, strip_delete_latency}
+                ],
+                " replication factor: " ++ integer_to_list(?REPLICATION_FACTOR) ++
+                " strip interval: " ++ integer_to_list(?BUFFER_STRIP_INTERVAL) ++
+                " sync interval: " ++ integer_to_list(?DEFAULT_SYNC_INTERVAL) ++
+                " replication failure rate: " ++ integer_to_list(?DEFAULT_REPLICATION_FAIL_RATIO) ++
+                " node kill rate: " ++ integer_to_list(?DEFAULT_NODE_KILL_RATE) ++
+                " report stats interval: " ++ integer_to_list(?REPORT_TICK_INTERVAL)
+            ),
             dotted_db_stats:start(),
 
             {ok, Pid};
