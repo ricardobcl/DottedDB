@@ -119,8 +119,11 @@ handle_info(sync, State=#state{sync_mode=on, sync_interval=Interval}) ->
 
 handle_info({_RefId, ok, sync}, State) ->
     {noreply, State};
-handle_info({_RefId, timeout}, State) ->
-    lager:warning("Sync request timeout!"),
+handle_info({_RefId, timeout, restart}, State) ->
+	lager:warning("Kill node request timeout!"),
+	{noreply, State};
+handle_info({_RefId, timeout, Info}, State) ->
+    lager:warning("Sync request timeout: ~p ",[Info]),
     {noreply, State};
 handle_info({_RefId, cancel, sync}, State) ->
     lager:warning("Sync node request canceled!"),
@@ -137,9 +140,6 @@ handle_info({_RefId, ok, restart, _NewID}, State) ->
     {noreply, State};
 handle_info({_RefId, error, restart}, State) ->
     lager:warning("Kill node request error!"),
-    {noreply, State};
-handle_info({_RefId, timeout, restart}, State) ->
-    lager:warning("Kill node request timeout!"),
     {noreply, State};
 handle_info({_RefId, cancel, restart}, State) ->
     lager:warning("Kill node request canceled!"),

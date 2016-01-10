@@ -74,7 +74,7 @@ sync_start_A(timeout, State=#state{ req_id  = ReqID,
 
 %% @doc
 sync_missing_B(timeout, State) ->
-    State#state.from ! {State#state.req_id, timeout},
+    State#state.from ! {State#state.req_id, timeout, { sync_missing_B, State#state.node_a } },
     {stop, normal, State};
 sync_missing_B({cancel, ReqID, recovering}, State=#state{req_id = ReqID}) ->
     State#state.from ! {ReqID, cancel, sync},
@@ -90,7 +90,7 @@ sync_missing_B({ok, ReqID, IdA={_,_}, NodeB, EntryBInClockA},
 
 %% @doc
 sync_missing_A(timeout, State) ->
-    State#state.from ! {State#state.req_id, timeout},
+    State#state.from ! {State#state.req_id, timeout, { sync_missing_A, State#state.node_a, State#state.node_b} },
     {stop, normal, State};
 sync_missing_A({cancel, ReqID, recovering}, State=#state{req_id = ReqID}) ->
     State#state.from ! {ReqID, cancel, sync},
@@ -109,7 +109,7 @@ sync_missing_A({ok, ReqID, IdB={_,_}, BaseClockB, EntryAInClockB, MissingFromA},
 
 %% @doc
 sync_repair_AB(timeout, State) ->
-    State#state.from ! {State#state.req_id, timeout},
+    State#state.from ! {State#state.req_id, timeout, { sync_repair_AB,  State#state.node_a, State#state.node_b} },
     {stop, normal, State};
 sync_repair_AB({cancel, ReqID, recovering}, State=#state{req_id = ReqID}) ->
     State#state.from ! {ReqID, cancel, sync},
@@ -156,7 +156,7 @@ sync_repair_AB({ok, ReqID, IdA1={_,_}, _, _, _},
 
 %% @doc
 sync_ack(timeout, State) ->
-    State#state.from ! {State#state.req_id, timeout},
+    State#state.from ! {State#state.req_id, timeout, { sync_ack,  State#state.node_a, State#state.node_b} },
     {stop, normal, State};
 sync_ack({cancel, ReqID, recovering}, State=#state{req_id = ReqID}) ->
     State#state.from ! {ReqID, cancel, sync},

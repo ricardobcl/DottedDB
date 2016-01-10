@@ -218,10 +218,10 @@ process_stats(Now, State) ->
 save_histogram(Elapsed, Window, StatName) ->
     Stats = folsom_metrics:get_histogram_statistics({histogram, StatName}),
     Units = folsom_metrics:get_metric_value({units, StatName}),
-    case proplists:get_value(n, Stats) > 0 of
+    Line = case proplists:get_value(n, Stats) > 0 of
         true ->
             P = proplists:get_value(percentile, Stats),
-            Line = io_lib:format("~w, ~w, ~w, ~w, ~.1f, ~w, ~w, ~w, ~w, ~w, ~w\n",
+            io_lib:format("~w, ~w, ~w, ~w, ~.1f, ~w, ~w, ~w, ~w, ~w, ~w\n",
                                  [Elapsed,
                                   Window,
                                   Units,
@@ -235,7 +235,7 @@ save_histogram(Elapsed, Window, StatName) ->
                                   0]);
         false ->
             lager:debug("No data for stat: ~p\n", [StatName]),
-            Line = io_lib:format("~w, ~w, 0, 0, 0, 0, 0, 0, 0, 0, 0\n",
+            io_lib:format("~w, ~w, 0, 0, 0, 0, 0, 0, 0, 0, 0\n",
                                  [Elapsed,
                                   Window])
     end,

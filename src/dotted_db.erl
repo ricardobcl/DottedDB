@@ -693,10 +693,12 @@ process_coverage_commands(Response=[{_,_,{ok, all_current_dots, _}}|_]) ->
     DDots = lists:flatten([ D || {_,_,{ok, all_current_dots, {_,D}}} <- Response]),
     WDotsUSort = lists:usort(WDots),
     DDotsUSort = lists:usort(DDots),
+    WritesMissing = compute_missing_dots(lists:sort(WDots)),
     io:format("========= Consistency Check ==========   \n"),
     io:format("Writes:  Length Dots    :\t ~p\n",[LWDots]),
     io:format("Writes:  Dots       Len :\t ~p\n",[length(WDots)]),
     io:format("Writes:  Dots Usort Len :\t ~p\n",[length(WDotsUSort)]),
+    io:format("Writes Missing          :\t ~p\n",[WritesMissing]),
     io:format("Deletes: Length Dots    :\t ~p\n",[LDDots]),
     io:format("Deletes: Dots       Len :\t ~p\n",[length(DDots)]),
     io:format("Deletes: Dots Usort Len :\t ~p\n",[length(DDotsUSort)]),
@@ -706,11 +708,23 @@ process_coverage_commands(Response=[{_,_,{ok, all_current_dots, _}}|_]) ->
     end,
     case length(DDots) == ?REPLICATION_FACTOR * length(DDotsUSort) of
         true  -> io:format("\t~s~s\n",[color:on_green("Deletes GOOD!  Total: "),color:on_green(integer_to_list(length(DDotsUSort)))]);
-        false -> io:format("\t~s~s\n",[color:on_red("Deletes Meh!  Total: "),color:on_yellow(integer_to_list(length(DDotsUSort)))])
+        false -> io:format("\t~s~s\n",[color:on_yellow("Deletes Meh!  Total: "),color:on_yellow(integer_to_list(length(DDotsUSort)))])
     end,
-    % io:format("All Writes Dots: ~p\n",[[ W || {_,_,{ok, all_current_dots, {W,_}}} <- Response]]),
-    % io:format("All Deletes Dots: ~p\n",[[ D || {_,_,{ok, all_current_dots, {_,D}}} <- Response]]),
     ok.
+
+compute_missing_dots(L) ->
+    L2 = compute_missing_dots(L,[]),
+    [ {N,E} || {N,E}  <- L2, N =/= ?REPLICATION_FACTOR].
+
+compute_missing_dots([],L) -> L;
+compute_missing_dots([H|T],[]) ->
+    compute_missing_dots(T,[{1,H}]);
+compute_missing_dots([H1|T],[{N,H2}|T2]) when H1 =:= H2 ->
+    compute_missing_dots(T,[{N+1,H2}|T2]);
+compute_missing_dots([H1|T],L=[{_,H2}|_]) when H1 =/= H2 ->
+    compute_missing_dots(T,[{1,H1}|L]).
+
+
 
 process_vnode_states(States) ->
     Results         = [ process_vnode_state(State) || State <- States ],

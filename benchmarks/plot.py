@@ -69,7 +69,7 @@ def draw(stats, col):
             plt.step(x, y, label="Strip")
 
             plt.ylabel('Percentage')
-            plt.xlabel('Seconds') 
+            plt.xlabel('Seconds')
             plt.legend()
             plt.ylim(ymin=0)
             plt.ylim(ymax=1)
