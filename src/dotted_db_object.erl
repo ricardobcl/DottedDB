@@ -88,9 +88,14 @@ fill(Key, NodeClock, Object) ->
 -spec sync(object(), object()) -> object().
 sync(O1, O2) ->
     DCC = swc_kv:sync(get_container(O1), get_container(O2)),
-    case get_fsm_time(O1) of
-        undefined   -> set_container(DCC, O2);
-        _           -> set_container(DCC, O1)
+    case {get_fsm_time(O1), get_fsm_time(O2)} of
+        {_, undefined}  -> set_container(DCC, O1);
+        {undefined, _}  -> set_container(DCC, O2);
+        {_, _}          ->
+            case DCC == get_container(O1) of
+                true -> set_container(DCC, O1);
+                false -> set_container(DCC, O2)
+            end
     end.
 
 -spec add_to_node_clock(bvv(), object()) -> bvv().
