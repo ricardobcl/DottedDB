@@ -23,74 +23,37 @@ cluster_ip              = '192.168.112.'
 machines                = ['38', '39', '40', '55', '56']
 cluster_user            = 'gsd'
 cluster_private_key     = '/Users/ricardo/.ssh/gsd_private_key'
-
-cluster_bb_path         = '/home/gsd/basho_bench/tests/current/'
+remote_bb_path          = '/home/gsd/basho_bench/tests/current/'
 dotted_path             = '/home/gsd/DottedDB/_build/default/rel/dotted_db/data/stats/current/'
 basic_path              = '/home/gsd/BasicDB/_build/default/rel/basic_db/data/stats/current/'
-cluster_path            = '/Users/ricardo/github/DottedDB/benchmarks/tests/cluster/'
 bb_summary_path         = '/Users/ricardo/github/DottedDB/benchmarks/priv/summary.r'
-local_path              = '/Users/ricardo/github/DottedDB/benchmarks/tests/local/'
-current_dir             = '/Users/ricardo/github/DottedDB/benchmarks/tests/current'
-current_dotted_dir      = '/Users/ricardo/github/DottedDB/benchmarks/tests/current_dotted'
-current_basic_dir       = '/Users/ricardo/github/DottedDB/benchmarks/tests/current_basic'
+local_path              = '/Users/ricardo/github/DottedDB/benchmarks/tests/'
+current_dir             = local_path + 'current/'
 
 
 
 """ Create a new folder for the incoming files.
 Also, make the folder current a symlink to the new folder.
 """
-def create_local_folder(type=""):
-    if type == 'local_dotted' or type == 'local_basic':
+def create_folder(type=""):
+    if type == 'dotted' or type == 'basic':
         new = local_path + type + '/' + get_folder_time() + '/'
         os.makedirs(new)
-        print "New LOCAL directory: " + new
+        print "New directory: " + new
         change_current(new)
-        if type == 'local_dotted':
-            change_dotted_current(new)
-        else:
-            change_basic_current(new)
     else:
         print "Error creating dir: " + type + "!"
         sys.exit(1)
 
-def create_cluster_folder(type=""):
-    if type == 'cluster_dotted' or type == 'cluster_basic':
-        new = cluster_path + type + '/' + get_folder_time() + '/'
-        os.makedirs(new)
-        print "New CLUSTER directory: " + new
-        change_current(new)
-        if type == 'cluster_dotted':
-            change_dotted_current(new)
-        else:
-            change_basic_current(new)
-    else:
-        print "Error creating dir: " + type + "!"
-        sys.exit(1)
-
-
-""" Change where the current directory is pointing to.
-"""
-def change_current_aux(f, cur):
+def change_current(f):
     if not os.path.exists(f):
         print "Folder " + f + " does not exist!"
         sys.exit(1)
     else:
-        call(["rm","-rf", cur])
-        call(["ln","-s", f, cur])
-        print cur + " now points to: " + f
+        call(["rm","-rf", current_dir])
+        call(["ln","-s", f, current_dir])
+        print "\'current\' now points to: " + f
 
-def change_current(f):
-    change_current_aux(f, current_dir)
-
-def change_dotted_current(f):
-    change_current_aux(f, current_dotted_dir)
-
-def change_basic_current(f):
-    change_current_aux(f, current_basic_dir)
-
-
-""" Creates a new folder name with the current date.
-"""
 def get_folder_time():
     now = datetime.now()
     return '%4d%02d%02d_%02d%02d%02d' % (now.year, now.month, now.day, now.hour, now.minute, now.second)
@@ -99,17 +62,54 @@ def get_folder_time():
 
 """ Get stat files from the machines in the cluster
 """
-def get_cluster_files(type):
+def get_files(type):
     print "Getting files from remote cluster"
     ori = dotted_path
     dest = current_dir
-    if type != 'cluster_dotted' and type != 'cluster_basic':
+    if type != 'dotted' and type != 'vc':
         print "ERROR: get_files error in path"
         sys.exit(1)
     i = 0
     for m in machines:
         i += 1
         machine = cluster_ip + m
+        print "Getting stats files from: ", machine
+        s = pysftp.Connection(host=machine,username=cluster_user,private_key=cluster_private_key)
+        os.makedirs(dest + "node%s/"%i)
+        s.get_d(ori, dest + "node%s/"%i)
+        s.close()
+    print "Getting basho bench files from: ", machine
+    s = pysftp.Connection(host=bench_ip,username=cluster_user,private_key=cluster_private_key)
+    os.makedirs(dest + "basho_bench")
+    s.get_d(remote_bb_path, dest + "basho_bench")
+    s.close()
+
+
+def do_bashobench(f=''):
+    if f == '':
+        call(["Rscript","--vanilla",bb_summary_path,"-i",current_dir+"basho_bench"])
+    else:
+        call(["Rscript","--vanilla",bb_summary_path,"-i",f+"/basho_bench"])
+
+
+
+
+
+
+
+
+###############################################
+### Plotting
+###############################################
+
+
+def filter_zero_n(m):
+    return np.array(filter(lambda x:x[2] != 0, m))
+
+def read_csv(name):
+    return filter_zero_n( np.loadtxt( name,  delimiter=',', skiprows=1))
+
+def load_local_histogram(name):
         print "Getting stats files from: ", machine
         s = pysftp.Connection(host=machine,username=cluster_user,private_key=cluster_private_key)
         os.makedirs(dest + "/node%s/"%i)
@@ -296,50 +296,11 @@ def draw(stats, col):
             plt.figure()
             plt.title(name.replace("-"," ").title())
 
-            f = np.array(map(lambda x: x/1000, f0))
-            ecdf = sm.distributions.ECDF(f)
-            x = np.linspace(min(f), max(f))
-            y = ecdf(x)
-            plt.step(x, y, label="Strip")
-
-            plt.ylabel('Percentage')
-            plt.xlabel('Seconds') 
-            plt.legend()
-            plt.ylim(ymin=0)
-            plt.ylim(ymax=1)
-            # save in PDF
-            pp = PdfPages(dest_path + name + 'cdf.pdf')
-            pp.savefig()
-            pp.close()
-        else:
-            print "unknown type: " + type_stat
-        print("Done.")
+    markers = [('o','g'),('x','r'),('+','b')]
+    files = get_csv_names()
+    draw(files, [columns[4], columns[9]])
+    # draw([files[0]], [columns[4], columns[9]])
     return 0
-
-
-
-## Do the plotting
-
-def do_cluster_plotting():
-    if not os.path.exists(current_dotted_dir) or not os.path.exists(current_basic_dir):
-        print "Error: no basic and/or dotted dirs"
-        return -1
-    else:
-        columns = [ (0,'elapsed'),
-                (1,'window'),
-                (2,'n'),
-                (3,'min'),
-                (4,'mean'),
-                (5,'median'),
-                (6,'95p'),
-                (7,'99p'),
-                (8,'99.9p'),
-                (9,'max')]
-        markers = [('o','g'),('x','r'),('+','b')]
-        files = get_csv_names()
-        draw(files, [columns[4], columns[9]])
-        # draw([files[0]], [columns[4], columns[9]])
-        return 0
 
 
 ###############################################
@@ -353,18 +314,15 @@ def main(argv):
     arg1 = ""
     if len(sys.argv)>1:
         arg1 = sys.argv[1]
-    print "EXECUTING -> " + arg1
-    if arg1 == 'cluster_dotted' or arg1 == 'cluster_basic':
-        create_cluster_folder(arg1)
-        get_cluster_files(arg1)
+    print "EXECUTE " + arg1
+    if arg1 == 'dotted' or arg1 == 'basic':
+        create_folder(arg1)
+        get_files(arg1)
         do_bashobench()
-        # do_cluster_plotting()
-    elif arg1 == 'local_dotted' or arg1 == 'local_basic':
-        create_local_folder(arg1)
-        # get_local_files(arg1)
+    elif arg1 == 'cluster_dotted':
+        do_cluster_plotting('/Users/ricardo/github/DottedDB/benchmarks/tests/cluster/')
+    elif arg1 == 'bb':
         do_bashobench()
-    elif arg1 == 'cluster_plot':
-        do_cluster_plotting()
     elif arg1 == 'local_plot':
         do_local_plot()
     elif arg1 == 'current':
