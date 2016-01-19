@@ -244,8 +244,6 @@ desc "deletes the database storage to start from scratch"
 task :delete_storage_rel do
   print yellow %x<rm -rf _build/default/rel/dotted_db/data/vnode_state>
   print yellow %x<rm -rf _build/default/rel/dotted_db/data/objects>
-  print yellow %x<rm -rf _build/default/rel/dotted_db/data/anti_entropy>
-  print yellow %x<rm -rf _build/default/rel/dotted_db/data/dotted_db_exchange_fsm>
   puts green " ========> Storage Deleted!           "
 end
 
