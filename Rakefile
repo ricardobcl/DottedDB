@@ -23,6 +23,13 @@ task :list_errors do
   print reset_color
 end
 
+desc "counters # of errors lines in the dev cluster log"
+task :list_errors_rel do
+  print yellow2
+  print `cat _build/default/rel/dotted_db/log/error.log _build/default/rel/dotted_db/log/crash.log | wc -l`
+  print reset_color
+end
+
 desc "resets the logs"
 task :clean_errors do
   (1..NUM_NODES).each do |n|
@@ -32,10 +39,22 @@ task :clean_errors do
   puts green " ========> Cleaned logs!             "
 end
 
+desc "resets the logs"
+task :clean_errors_rel do
+  `rm -rf _build/default/rel/dotted_db/log/*`
+  `touch _build/default/rel/dotted_db/log/error.log _build/default/rel/dotted_db/log/crash.log`
+  puts green " ========> Cleaned logs!             "
+end
+
 desc "attach to a dottedDB console"
 task :attach, :node do |t, args|
   args.with_defaults(:node => 1)
   sh %{_build/dev/dev#{args.node}/dotted_db/bin/dotted_db attach}
+end
+
+desc "attach to DottedDB non-dev release"
+task :attach_rel do
+    sh %{_build/default/rel/dotted_db/bin/dotted_db attach}
 end
 
 desc "Make a release"
@@ -72,6 +91,18 @@ task :start do
   puts green " ========> Dev Cluster Started!           "
 end
 
+desc "start rel dotted_db node"
+task :start_rel do
+  print yellow `_build/default/rel/dotted_db/bin/dotted_db start`
+  puts green " ========> Node Started!                  "
+end
+
+desc "stop rel dotted_db node"
+task :stop_rel do
+  print yellow `_build/default/rel/dotted_db/bin/dotted_db stop`
+  puts green " ========> Node Stopped!                  "
+end
+
 desc "stop all dotted_db nodes"
 task :stop do
   print yellow `for d in _build/dev/dev*; do $d/dotted_db/bin/dotted_db stop; done`
@@ -90,6 +121,18 @@ task :join do
   puts bg_green "        Dev Cluster Joined!           "
   print yellow `_build/dev/dev1/dotted_db/bin/dotted_db-admin cluster plan`
   print yellow `_build/dev/dev1/dotted_db/bin/dotted_db-admin cluster commit`
+  puts bg_green "        Dev Cluster Committed!           "
+end
+
+
+desc "join dotted_db nodes (only needed once)"
+task :join_rel do
+  sleep(4)
+  print yellow `_build/default/rel/dotted_db/bin/dotted_db-admin cluster join dotted_db@192.168.112.38`
+  sleep(rand(3..10))
+  puts bg_green "        Dev Cluster Joined!           "
+  print yellow `_build/default/rel/dotted_db/bin/dotted_db-admin cluster plan`
+  print yellow `_build/default/rel/dotted_db/bin/dotted_db-admin cluster commit`
   puts bg_green "        Dev Cluster Committed!           "
 end
 
@@ -132,11 +175,22 @@ task :member_status do
   puts yellow `_build/dev/dev1/dotted_db/bin/dotted_db-admin member-status`
 end
 
+desc "dotted_db-admin member-status"
+task :member_status_rel do
+  puts yellow `_build/default/rel/dotted_db/bin/dotted_db-admin member-status`
+end
+
 desc "restart all dotted_db nodes"
 task :restart => [:stop, :compile, :delete_storage, :clean_errors, :start, :list_errors, :attach]
 
+desc "restart dotted_db node"
+task :restart_rel => [:stop_rel, :compile, :delete_storage_rel, :clean_errors_rel, :start_rel, :list_errors_rel, :attach_rel]
+
 desc "restart all dotted_db nodes"
 task :restart_with_storage => [:stop, :compile, :start]
+
+desc "restart dotted_db nodes"
+task :restart_with_storage_rel => [:stop_rel, :compile, :start_rel]
 
 desc "clean data from all dotted_db nodes"
   task :clean => :stop do
@@ -146,11 +200,22 @@ desc "clean data from all dotted_db nodes"
   puts green " ========> Dev Cluster Cleaned!           "
 end
 
+desc "clean data from dotted_db node"
+task :clean_rel => :stop do
+  `rm -rf _build/default/rel`
+  puts green " ========> Release Cleaned!           "
+end
+
 desc "ping all dotted_db nodes"
 task :ping do
   (1..NUM_NODES).each do |n|
       sh %{_build/dev/dev#{n}/dotted_db/bin/dotted_db ping}
   end
+end
+
+desc "ping dotted_db node"
+task :ping_rel do
+  sh %{_build/default/rel/dotted_db/bin/dotted_db ping}
 end
 
 desc "dotted_db-admin test"
@@ -165,9 +230,23 @@ task :status do
   sh %{_build/dev/dev1/dotted_db/bin/dotted_db-admin  status}
 end
 
+desc "dotted_db-admin status"
+task :status_rel do
+  sh %{_build/default/rel/dotted_db/bin/dotted_db-admin  status}
+end
+
 desc "dotted_db-admin ring-status"
 task :ring_status do
   sh %{_build/dev/dev1/dotted_db/bin/dotted_db-admin  ring-status}
+end
+
+desc "deletes the database storage to start from scratch"
+task :delete_storage_rel do
+  print yellow %x<rm -rf _build/default/rel/dotted_db/data/vnode_state>
+  print yellow %x<rm -rf _build/default/rel/dotted_db/data/objects>
+  print yellow %x<rm -rf _build/default/rel/dotted_db/data/anti_entropy>
+  print yellow %x<rm -rf _build/default/rel/dotted_db/data/dotted_db_exchange_fsm>
+  puts green " ========> Storage Deleted!           "
 end
 
 desc "plot local dev nodes stats"
