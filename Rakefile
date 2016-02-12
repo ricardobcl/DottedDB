@@ -94,6 +94,7 @@ end
 desc "start rel dotted_db node"
 task :start_rel do
   print yellow `_build/default/rel/dotted_db/bin/dotted_db start`
+  print yellow `nohup benchmarks/dstat.sh &`
   puts green " ========> Node Started!                  "
 end
 
