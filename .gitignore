@@ -1,4 +1,5 @@
 benchmarks/tests/*
+benchmarks/flamegraphs/*
 benchmarks/*.out
 benchmarks/*.svg
 _build/*
