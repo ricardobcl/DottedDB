@@ -32,7 +32,7 @@
 -define(BUFFER_STRIP_INTERVAL, 1000). % (ms) interval between attempts to strip local keys (includes replicated keys)
 -define(MAX_KEYS_SENT_RECOVERING, 1000). % max sent at a time to a restarting node.
 
--define(STATS_FLUSH_INTERVAL, 10). % (sec) interval between flushing data to disk
+-define(STATS_FLUSH_INTERVAL, 5). % (sec) interval between flushing data to disk
 -define(DEFAULT_DO_STATS, true). % bool that says if a vnode should collect and report stats
 
 -define(ETS_CACHE_REPLICA_NODES, ets_cache_replica_nodes).

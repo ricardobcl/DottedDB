@@ -5,6 +5,10 @@
 
 -export([
          ping/0,
+         start_bench/0,
+         start_bench/1,
+         end_bench/1,
+         end_bench/2,
          set_sync_interval/1,
          set_sync_interval/2,
          set_strip_interval/1,
@@ -22,6 +26,7 @@
          actual_deletes/0,
          issued_deletes/0,
          written_keys/0,
+         all_keys/0,
          final_written_keys/0,
          new_client/0,
          new_client/1,
@@ -64,6 +69,34 @@ ping() ->
     PrefList = riak_core_apl:get_primary_apl(DocIdx, 1, dotted_db),
     [{IndexNode, _Type}] = PrefList,
     riak_core_vnode_master:sync_spawn_command(IndexNode, ping, dotted_db_vnode_master).
+
+start_bench() ->
+    {ok, LocalNode} = new_client(),
+    start_bench(LocalNode).
+
+start_bench({?MODULE, TargetNode}) ->
+    case node() of
+        % if this node is already the target node
+        TargetNode ->
+            dotted_db_stats:start_bench();
+        % this is not the target node
+        _ ->
+            proc_lib:spawn_link(TargetNode, dotted_db_stats, start_bench, [])
+    end.
+
+end_bench(Args) ->
+    {ok, LocalNode} = new_client(),
+    end_bench(Args, LocalNode).
+
+end_bench(Args, {?MODULE, TargetNode}) ->
+    case node() of
+        % if this node is already the target node
+        TargetNode ->
+            dotted_db_stats:end_bench(Args);
+        % this is not the target node
+        _ ->
+            proc_lib:spawn_link(TargetNode, dotted_db_stats, end_bench, [Args])
+    end.
 
 %% @doc Set the rate at which nodes sync with each other in milliseconds.
 set_sync_interval(SyncInterval) ->
@@ -251,6 +284,13 @@ written_keys() ->
 final_written_keys() ->
     ReqID = dotted_db_utils:make_request_id(),
     Request = [ReqID, self(), final_written_keys, ?DEFAULT_TIMEOUT],
+    {ok, _} = dotted_db_coverage_fsm_sup:start_coverage_fsm(Request),
+    wait_for_reqid(ReqID, ?DEFAULT_TIMEOUT).
+
+%% @doc
+all_keys() ->
+    ReqID = dotted_db_utils:make_request_id(),
+    Request = [ReqID, self(), all_keys, ?DEFAULT_TIMEOUT],
     {ok, _} = dotted_db_coverage_fsm_sup:start_coverage_fsm(Request),
     wait_for_reqid(ReqID, ?DEFAULT_TIMEOUT).
 
@@ -619,6 +659,14 @@ decode_get_reply({BinValues, Context}) ->
 
 process_coverage_commands(Response=[{_,_,{ok, vs, _}}|_]) ->
     process_vnode_states(Response);
+
+process_coverage_commands(Response=[{_,_,{ok, ak, _, _, _}}|_]) ->
+    Keys0 = lists:flatten([ D++IK++FK || {_,_,{ok, ak, D, IK, FK}} <- Response]),
+    Keys = sets:to_list(sets:from_list(Keys0)),
+    Len = length(Keys),
+    io:format("\========= ALL KEYS ==========   \n"),
+    io:format("Length:\t ~p\n",[Len]),
+    Len;
 
 process_coverage_commands(Response=[{_,_,{ok, adk, _}}|_]) ->
     Keys0 = lists:flatten([ K || {_,_,{ok, adk, K}} <- Response]),

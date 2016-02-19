@@ -9,6 +9,8 @@
             , add_stats/1
             , add_stats/2
             , notify/2
+            , start_bench/0
+            , end_bench/1
             , start/0
             , stop/0
             , new_dir/0
@@ -24,7 +26,9 @@
 -define(CURRENT_DIR, "current").
 -define(ETS, ets_dotted_db_entropy).
 
--record(state, { 
+-record(state, {
+        bench              = off,
+        bench_start        = os:timestamp(),
         stats              = [],
         start_time         = os:timestamp(),
         last_write_time    = os:timestamp(),
@@ -56,6 +60,14 @@ notify(Name, 0.0) -> notify(Name, 0);
 notify(Name, Value) ->
     gen_server:cast(?MODULE, {notify, Name, Value}).
 
+%% @doc Store the time at which the benchmark started
+start_bench() ->
+    gen_server:call(?MODULE, start_bench).
+
+%% @doc Store the time at which the benchmark started
+end_bench(Args) ->
+    gen_server:call(?MODULE, {end_bench, Args}).
+
 %% @doc Starts the timer that flush the data to disk.
 start() ->
     gen_server:call(?MODULE, start).
@@ -86,9 +98,23 @@ init([Stats]) ->
     _ = [create_stat_folsom(Stat) || Stat <- Stats],
 
     {ok, #state{ stats = Stats,
+                 bench = off,
                  flush_interval = timer:seconds(?STATS_FLUSH_INTERVAL)}}.
 
 %% Synchronous calls
+handle_call(start_bench, _From, State) ->
+    Now = os:timestamp(),
+    {reply, ok, State#state{bench = on, bench_start = Now}};
+
+handle_call({end_bench, _Args}, _From, State=#state{bench = off}) ->
+    lager:info("Bench already ended!"),
+    {reply, ok, State};
+handle_call({end_bench, Args}, _From, State=#state{bench = on}) ->
+    StartTime = State#state.bench_start,
+    EndTime = os:timestamp(),
+    save_bench_file(StartTime, EndTime, Args, State),
+    {reply, ok, State#state{bench = off}};
+
 handle_call(start, _From, State) ->
     %% Schedule next report (repeatedly calls `self() ! report`)
     {ok, Timer} = timer:send_interval(State#state.flush_interval, flush),
@@ -166,7 +192,9 @@ handle_cast({notify, {gauge, Name}, Value}, State = #state{active = true}) ->
         [] -> [];
         [{Name, L}] -> L
     end,
-    ets:insert(stats_gauge, {Name, [Value | List]}),
+    {Mega, Sec, _} = erlang:now(),
+    Timestamp = Mega * 1000000 + Sec,
+    ets:insert(stats_gauge, {Name, [{Timestamp, Value} | List]}),
     % ok = folsom_metrics:notify({gauge, Name}, Value),
     {noreply, State}.
 
@@ -221,7 +249,7 @@ save_histogram(Elapsed, Window, StatName) ->
     Line = case proplists:get_value(n, Stats) > 0 of
         true ->
             P = proplists:get_value(percentile, Stats),
-            io_lib:format("~w, ~w, ~w, ~w, ~.1f, ~w, ~w, ~w, ~w, ~w, ~w\n",
+            io_lib:format("~w, ~w, ~w, ~w, ~.1f, ~w, ~w, ~w, ~w, ~w, ~w, ~w, ~w\n",
                                  [Elapsed,
                                   Window,
                                   Units,
@@ -232,10 +260,12 @@ save_histogram(Elapsed, Window, StatName) ->
                                   proplists:get_value(99, P),
                                   proplists:get_value(999, P),
                                   proplists:get_value(max, Stats),
+                                  round(Units * proplists:get_value(arithmetic_mean, Stats)),
+                                  proplists:get_value(standard_deviation, Stats),
                                   0]);
         false ->
             lager:debug("No data for stat: ~p\n", [StatName]),
-            io_lib:format("~w, ~w, 0, 0, 0, 0, 0, 0, 0, 0, 0\n",
+            io_lib:format("~w, ~w, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0\n",
                                  [Elapsed,
                                   Window])
     end,
@@ -249,9 +279,25 @@ save_gauge(StatName) ->
         [{StatName, Values}] ->
             ets:delete(stats_gauge, StatName),
             % lager:info("~p: |~p| \n",[StatName, Values]),
-            Line = lists:foldl(fun(X,Acc) -> Acc++io_lib:format("~w\n", [X]) end, [], Values),
+            Line = lists:foldl(fun({Time,Value}, Acc) -> Acc++io_lib:format("~w, ~w\n", [Time,Value]) end, [], Values),
             file:write(erlang:get({cdf_file, StatName}), Line)
     end.
+
+save_bench_file(StartTime, EndTime, [SyncTime, ReplFail, NodeKill, StripInterval], State) ->
+    NumKeys = dotted_db:all_keys(),
+    {ok, Nvnodes} = application:get_env(riak_core, ring_creation_size),
+    ST = round(timer:now_diff(StartTime, State#state.start_time) / 1000000),
+    ET = round(timer:now_diff(EndTime, State#state.start_time) / 1000000),
+    Line0 = io_lib:format("Start Time \t\t\t:\t~w\nEnd Time \t\t\t:\t~w\nNumber of Keys \t\t\t:\t~w\nSync Interval \t\t\t:\t~w\nNode Kill Rate \t\t\t:\t~w\n",
+                       [ST, ET, NumKeys, SyncTime, NodeKill]),
+    Line1 = io_lib:format("Replication Failure Rate \t:\t~w\nNumber of Vnodes \t\t:\t~w\nReplication Factor \t\t:\t~w\n",
+                       [ReplFail, Nvnodes, ?REPLICATION_FACTOR]),
+    Line2 = io_lib:format("Strip Interval \t\t\t:\t~w\n", [StripInterval]),
+    Dir = erlang:get(bench_file),
+    Fname = filename:join([Dir, "bench_file.csv"]),
+    {ok, F} = file:open(Fname, [raw, binary, write]),
+    ok = file:write(F, list_to_binary(Line0 ++ Line1 ++ Line2)).
+
 
 create_new_dir() ->
     TestDir = get_stats_dir(new_dir_name()),
@@ -299,6 +345,7 @@ init_stat_files(Stats, Header, NewDir) ->
         true -> create_new_dir();
         false -> ok
     end,
+    erlang:put(bench_file, TestDir),
     %% Setup output file handles for dumping periodic CSV of histogram results.
     [erlang:put({csv_file, Name}, histogram_csv_file(Name,TestDir,Header)) || {histogram, Name} <- Stats],
     %% Setup output file handles for dumping gauge value for the CDF (Cumulative distribution function).
@@ -309,7 +356,7 @@ histogram_csv_file(Label, Dir, Header) ->
     Fname = normalize_label(Label) ++ "_hist.csv",
     Fname2 = filename:join([Dir, Fname]),
     {ok, F} = file:open(Fname2, [raw, binary, write]),
-    ok = file:write(F, list_to_binary("elapsed, window, n, min, mean, median, 95th, 99th, 99_9th, max, errors ## "++Header++"\n")),
+    ok = file:write(F, list_to_binary(Header++"\nelapsed, window, n, min, mean, median, 95th, 99th, 99_9th, max, total_sum, std_dev, errors\n")),
     F.
 
 %% @doc Setups a csv file for a gauges.
@@ -317,7 +364,7 @@ gauge_cdf_file(Label, Dir, Header) ->
     Fname = normalize_label(Label) ++ "_gauge.csv",
     Fname2 = filename:join([Dir, Fname]),
     {ok, F} = file:open(Fname2, [raw, binary, write]),
-    ok = file:write(F, list_to_binary("gauge ## "++Header++"\n")),
+    ok = file:write(F, list_to_binary(Header++"\ntimestamp, value\n")),
     F.
 
 normalize_label(Label) when is_list(Label) ->

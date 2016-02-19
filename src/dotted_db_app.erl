@@ -58,10 +58,16 @@ start(_StartType, _StartArgs) ->
                 {histogram, sync_hit_ratio},
                 % size of the payload (actual data) of the sent objects in a sync
                 {histogram, sync_payload_size},
-                % size of the metadata of the sent objects in a sync
+                % size of the metadata used to know which objects to send in a sync
                 {histogram, sync_metadata_size},
+                % size of the causal context of the sent objects in a sync
+                {histogram, sync_context_size},
                 % number of missing objects sent
                 {histogram, sync_sent_missing},
+                % number of truly missing objects from those that were sent
+                {histogram, sync_sent_truly_missing},
+                % number of entries per clock (DCC) saved to disk
+                {histogram, entries_per_clock},
                 % number of (non-stripped) delete requests
                 {histogram, deletes_incomplete},
                 % number of actual delete in the server
@@ -77,12 +83,13 @@ start(_StartType, _StartArgs) ->
                 % gauge, point-in-time single value measure of strip latency for deletes
                 {gauge, strip_delete_latency}
                 ],
-                " replication factor: " ++ integer_to_list(?REPLICATION_FACTOR) ++
-                " strip interval: " ++ integer_to_list(?BUFFER_STRIP_INTERVAL) ++
-                " sync interval: " ++ integer_to_list(?DEFAULT_SYNC_INTERVAL) ++
-                " replication failure rate: " ++ integer_to_list(?DEFAULT_REPLICATION_FAIL_RATIO) ++
-                " node kill rate: " ++ integer_to_list(?DEFAULT_NODE_KILL_RATE) ++
-                " report stats interval: " ++ integer_to_list(?REPORT_TICK_INTERVAL)
+                "replication factor, strip interval, sync interval, message loss rate, node kill rate, stats interval\n" ++
+                integer_to_list(?REPLICATION_FACTOR) ++ ", " ++
+                integer_to_list(?BUFFER_STRIP_INTERVAL) ++ ", " ++
+                integer_to_list(?DEFAULT_SYNC_INTERVAL) ++ ", " ++
+                integer_to_list(?DEFAULT_REPLICATION_FAIL_RATIO) ++ ", " ++
+                integer_to_list(?DEFAULT_NODE_KILL_RATE) ++ ", " ++
+                integer_to_list(?REPORT_TICK_INTERVAL) ++ "\n"
             ),
             dotted_db_stats:start(),
 

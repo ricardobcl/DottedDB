@@ -14,6 +14,7 @@
             , sync/2
             , add_to_node_clock/2
             , equal/2
+            , equal_values/2
             , discard_values/2
             , add_value/3
             , get_values/1
@@ -91,8 +92,8 @@ sync(O1, O2) ->
     case {get_fsm_time(O1), get_fsm_time(O2)} of
         {_, undefined}  -> set_container(DCC, O1);
         {undefined, _}  -> set_container(DCC, O2);
-        {_, _}          ->
-            case DCC == get_container(O1) of
+        {A, B} ->
+            case A > B of
                 true -> set_container(DCC, O1);
                 false -> set_container(DCC, O2)
             end
@@ -105,6 +106,12 @@ add_to_node_clock(NodeClock, Object) ->
 -spec equal(object(), object()) -> boolean().
 equal(O1, O2) ->
     get_container(O1) == get_container(O2).
+
+-spec equal_values(object(), object()) -> boolean().
+equal_values(O1, O2) ->
+    {D1,_} = get_container(O1),
+    {D2,_} = get_container(O2),
+    D1 == D2.
 
 -spec discard_values(vv(), object()) -> object().
 discard_values(Context, Object) ->

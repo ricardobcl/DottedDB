@@ -126,7 +126,7 @@ waiting2({ok, ReqID, IndexNode, Response}, State=#state{
     end.
 
 finalize(timeout, State=#state{ do_rr       = false}) ->
-    lager:debug("GET_FSM: read repair OFF"),
+    % lager:debug("GET_FSM: read repair OFF"),
     {stop, normal, State};
 finalize(timeout, State=#state{ do_rr       = true,
                                 key         = BKey,

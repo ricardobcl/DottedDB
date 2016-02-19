@@ -18,7 +18,7 @@
 
 -define(TIMEOUT, 0).
 
--record(state, {socket, transport, client, options}).
+-record(state, {socket, transport, client, options, mode, strip}).
 
 %% API.
 
@@ -37,7 +37,7 @@ init(Ref, Socket, Transport, _Opts = []) ->
     ok = Transport:setopts(Socket, [{active, once}]),
     {ok, Client} = dotted_db:new_client(node()),
     gen_server:enter_loop(?MODULE, [],
-        #state{socket=Socket, transport=Transport, client=Client, options=[]}).
+        #state{socket=Socket, transport=Transport, client=Client, options=[], mode=stop, strip=-1}).
 
 handle_info({tcp, Socket, BinData}, State=#state{
         socket=Socket, transport=Transport}) ->
@@ -98,9 +98,9 @@ commands(D=[<<"PUT">>, Bucket, Key, Value], S) ->
 commands(D=[<<"UPDATE">>, Bucket, Key, Value], S) ->
     lager:debug("UPDATE Msg:~p",[D]),
     Context = case (S#state.client):get_at_node({Bucket, Key}) of
-        {ok, {_Values, Ctx}} -> 
+        {ok, {_Values, Ctx}} ->
             Ctx;
-        {not_found, Ctx} -> 
+        {not_found, Ctx} ->
             Ctx
     end,
     Response = case (S#state.client):put_at_node({Bucket, Key}, Value, Context, S#state.options) of
@@ -115,9 +115,9 @@ commands(D=[<<"UPDATE">>, Bucket, Key, Value], S) ->
 commands(D=[<<"DELETE">>, Bucket, Key], S) ->
     lager:debug("DELETE Msg:~p",[D]),
     Context = case (S#state.client):get_at_node({Bucket, Key}) of
-        {ok, {_Values, Ctx}} -> 
+        {ok, {_Values, Ctx}} ->
             Ctx;
-        {not_found, Ctx} -> 
+        {not_found, Ctx} ->
             Ctx
     end,
     Response = case (S#state.client):delete_at_node({Bucket, Key}, Context, S#state.options) of
@@ -130,13 +130,26 @@ commands(D=[<<"DELETE">>, Bucket, Key], S) ->
     send(S, Response);
 
 commands(D=[<<"OPTIONS">>, Sync, Strip, ReplicationFailure, NodeFailure], S) ->
-    lager:info("OPTIONS Msg:~p",[D]),
+    S2 = case S#state.mode of
+        stop ->
+            lager:info("Starting bench with options: ~p\n",[D]),
+            dotted_db_stats:start_bench(),
+            S#state{mode = start, strip = Strip};
+        start ->
+            lager:info("Stopping bench with options: ~p\n",[D]),
+            {ok, OldSync} = dotted_db_sync_manager:get_sync_interval(),
+            {ok, OldNodeFailure} = dotted_db_sync_manager:get_kill_node_interval(),
+            [{?REPLICATION_FAIL_RATIO, OldReplFailure}] = S#state.options,
+            OldStripInterval = S#state.strip,
+            dotted_db_stats:end_bench([OldSync, OldReplFailure, OldNodeFailure, OldStripInterval]),
+            S#state{mode = stop, strip = -1}
+    end,
     %% set new sync interval
     dotted_db_sync_manager:set_sync_interval(Sync),
     %% set new strip interval
     dotted_db:set_strip_interval2(Strip),
     %% set new replication message failure rate 0 <= rate <= 1
-    State1 = S#state{options=[{?REPLICATION_FAIL_RATIO, ReplicationFailure}]},
+    State1 = S2#state{options=[{?REPLICATION_FAIL_RATIO, ReplicationFailure}]},
     %% set new kill node rate
     dotted_db_sync_manager:set_kill_node_interval(NodeFailure),
     Response =  [<<"OK">>],
