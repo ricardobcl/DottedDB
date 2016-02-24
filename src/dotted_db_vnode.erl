@@ -685,7 +685,9 @@ handle_sync_start({sync_start, ReqID}, State=#state{mode=normal}) ->
     % choose a peer at random
     NodeB = {IndexB, _} = dotted_db_utils:random_from_list(dotted_db_utils:peers(State#state.index)),
     % get the NodeB entry from this node clock
-    EntryB = swc_node:get(IndexB, State#state.clock),
+    PeersIDs = swc_vv:ids(State#state.replicated),
+    VnodeB = proplists:lookup(IndexB, PeersIDs),
+    EntryB = swc_node:get(VnodeB, State#state.clock),
     % send a sync message to that node
     {reply, {ok, ReqID, State#state.id, NodeB, EntryB}, State}.
 
@@ -699,10 +701,10 @@ handle_sync_missing({sync_missing, ReqID, RemoteID={_,_}, LocalEntryInRemoteCloc
     % get the all the dots (only the counters) from the asking node clock, with id equal to the local node
     RemoteDots =  swc_node:values(LocalEntryInRemoteClock),
     % calculate what dots are present locally that the asking node does not have
-    MisssingDots = LocalDots -- RemoteDots,
+    MissingDots = lists:usort(LocalDots -- RemoteDots),
     {KBase, KeyList} = State#state.keylog,
     % get the keys corresponding to the missing dots,
-    MissingKeys = [lists:nth(MDot-KBase, KeyList) || MDot <- MisssingDots, MDot > KBase],
+    MissingKeys = [lists:nth(MDot-KBase, KeyList) || MDot <- MissingDots, MDot > KBase],
     % filter the keys that the asking node does not replicate
     RelevantMissingKeys = filter_irrelevant_keys(MissingKeys, RemoteIndex),
     % get each key's respective Object and strip any unnecessary causal information to save network
@@ -758,7 +760,8 @@ handle_sync_repair({sync_repair, {ReqID, RemoteNodeID={_,_}, RemoteClockBase, Mi
     % synchronize / merge the remote and local objects
     SyncedObjects = [{ Key, dotted_db_object:sync(Remote, Local), Local } || {Key, Remote, Local} <- FilledObjects],
     % filter the objects that are not missing after all
-    RealMissingObjects = [{ Key, Synced } || {Key, Synced, Local} <- SyncedObjects, not dotted_db_object:equal_values(Synced,Local)],
+    RealMissingObjects = [{ Key, Synced } || {Key, Synced, Local} <- SyncedObjects, (not dotted_db_object:equal_values(Synced,Local)) orelse
+                                        (dotted_db_object:get_values(Synced)==[] andalso dotted_db_object:get_values(Local)==[])],
     % save the synced objects and strip their causal history
     NonStrippedObjects = strip_save_batch(RealMissingObjects, State#state{clock=NodeClock}, Now),
     % schedule a later strip attempt for non-stripped synced keys
@@ -779,7 +782,8 @@ handle_sync_repair({sync_repair, {ReqID, RemoteNodeID={_,_}, RemoteClockBase, Mi
                     dotted_db_stats:notify({histogram, sync_hit_ratio}, round(Hit_Ratio)),
                     dotted_db_stats:notify({histogram, sync_sent_missing}, Sent),
                     dotted_db_stats:notify({histogram, sync_sent_truly_missing}, Repaired);
-                false -> ok
+                false ->
+                    dotted_db_stats:notify({histogram, sync_hit_ratio}, 100)
             end,
             dotted_db_stats:notify({histogram, sync_metadata_size}, byte_size(term_to_binary(RemoteClockBase))),
             ok;
