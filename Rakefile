@@ -94,12 +94,14 @@ end
 desc "start rel dotted_db node"
 task :start_rel do
   print yellow `_build/default/rel/dotted_db/bin/dotted_db start`
-  print yellow `nohup benchmarks/dstat.sh &`
+  sh "nohup benchmarks/dstat.sh &"
   puts green " ========> Node Started!                  "
 end
 
 desc "stop rel dotted_db node"
 task :stop_rel do
+  t = Time.now.to_i
+  sh "mv benchmarks/tests/dstat.csv benchmarks/tests/dstat_#{t}.csv"
   print yellow `_build/default/rel/dotted_db/bin/dotted_db stop`
   puts green " ========> Node Stopped!                  "
 end
