@@ -336,15 +336,16 @@ def write_latency_plot(DS,DE,BS,BE):
     basic_ecdf = sm.distributions.ECDF(basicY)
     basicX = np.linspace(min(basicY), max(basicY))
     basicY2 = basic_ecdf(basicX)
-    plt.step(basicX, basicY2, label="BasicDB")
+    plt.step(basicX/1000.0, basicY2, label="BasicDB")
 
     dottedY = dotted[:,1]
     dotted_ecdf = sm.distributions.ECDF(dottedY)
     dottedX = np.linspace(min(dottedY), max(dottedY))
     dottedY2 = dotted_ecdf(dottedX)
-    plt.step(dottedX, dottedY2, label="DottedDB")
+    plt.step(dottedX/1000.0, dottedY2, label="DottedDB")
 
-    plt.xlabel('Time')
+    plt.xlabel('Time (s)')
+    plt.xlim(xmax=13)
     plt.legend()
     pp = PdfPages(current_dotted_dir + '/repair_latency_CDF.pdf')
     pp.savefig()
@@ -390,6 +391,8 @@ def number_keys_plot(DS,DE,BS,BE,NVnodes,RF):
     dotted_wc = load_local_dotted_csv('write-completed_hist.csv', True)
     dotted_wi = load_local_dotted_csv('write-incomplete_hist.csv', True)
     dotted_d = load_local_dotted_csv('deletes-incomplete_hist.csv', True)
+    dotted3 = np.concatenate([dotted_wc, dotted_wi], axis=0)
+    dotted1 = mean_matrix(dotted3)
     dotted2 = np.concatenate([dotted_d, dotted_wc, dotted_wi], axis=0)
     dotted = mean_matrix(dotted2)
     # print "\n basic  before: " + str(basic2.shape) + "\n after: " + str(basic.shape)
@@ -402,6 +405,7 @@ def number_keys_plot(DS,DE,BS,BE,NVnodes,RF):
     plt.plot(basic[BS:BE,0]-BS*5, basic[BS:BE,10]/basic[BS:BE,2]*2*NVnodes/RF, linewidth=2, label='Basic', c='r', marker='^')
     # plt.plot(basic[:,0]-3*interval, basic[:,10]*2*(16/32.0), linewidth=2, label='Basic', c='r', marker='^')
     # plt.plot(dotted[DS:DE,0]-DS*5, dotted[DS:DE,10]*3*(16/32.0), linewidth=2, label='Dotted', c='g', marker='o')
+    plt.plot(dotted1[DS:DE,0]-DS*5, dotted1[DS:DE,10]/dotted1[DS:DE,2]*2*NVnodes/RF, linewidth=2, label='Ideal', c='b')
     plt.plot(dotted[DS:DE,0]-DS*5, dotted[DS:DE,10]/dotted[DS:DE,2]*3*NVnodes/RF, linewidth=2, label='Dotted', c='g', marker='o')
     plt.xlabel('Time')
     plt.ylabel('# Total Objects')
@@ -429,7 +433,7 @@ def sync_hit_ratio_plot(DS,DE,BS,BE):
     basic = join_matrix(basic_m, basic_tm)
     # print "\n basic before: " + str(basic.shape) + "\n after: " + str(basic_tm.shape) + "\n\n"
 
-    dotted2 = load_local_dotted_csv('sync-hit-ratio_hist.csv', True)
+    dotted2 = load_local_dotted_csv('sync-hit-ratio_hist.csv', False)
     dotted = mean_matrix(dotted2)
     # print "\n dotted before: " + str(dotted2.shape) + "\n after: " + str(dotted.shape)
 
@@ -452,7 +456,7 @@ def sync_hit_ratio_plot(DS,DE,BS,BE):
     plt.ylabel('Percentage (%)')
     plt.legend(loc='lower left')
     # plt.ylim(ymin=-150.0)
-    plt.ylim((-1,101))
+    plt.ylim((-1,102))
     plt.xlim(xmin=-5.0)
     plt.xlim(xmax=(DE-DS)*5)
     # plt.xlim(xmax=400)
@@ -494,9 +498,9 @@ def node_metadate_plot(DS, DE, BS, BE, bench):
     basic_total.fill(basic_size)
     print str(basic_size/1024.0) + " KB\n"
     dotted_total = (dotted1[:,4] + dotted2[:,4] + dotted3[:,4])
-    plt.plot(dotted1[DS:DE,0]-DS*5, basic_total[DS:DE]/1024.0, linewidth=3, label='Basic', c='r', marker='^')
-    plt.plot(basic[BS:BE,0]-BS*5, basic[BS:BE,4]/1024.0, linewidth=3, label='Real Basic', c='b', marker='s')
-    plt.plot(dotted1[DS:DE,0]-DS*5, dotted_total[DS:DE]/1024.0, linewidth=3, label='Dotted', c='g', marker='o')
+    plt.plot(dotted1[DS:DE,0]-DS*5, basic_total[DS:DE]/1024.0, linewidth=2, label='MT Theoretical Size', c='r', linestyle='--')
+    plt.plot(basic[BS:BE,0]-BS*5, basic[BS:BE,4]/1024.0, linewidth=3, label='BasicDB', c='r', marker='s')
+    plt.plot(dotted1[DS:DE,0]-DS*5, dotted_total[DS:DE]/1024.0, linewidth=3, label='DottedDB', c='g', marker='o')
     plt.xlabel('Time')
     plt.ylabel('Size (KB)')
     plt.legend(loc='center right')
