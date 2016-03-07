@@ -31,7 +31,7 @@ start(_StartType, _StartArgs) ->
                 N when is_integer(N)    -> N;
                 _                       -> 0
             end,
-            {ok, _} = ranch:start_listener(the_socket, 10,
+            {ok, _} = ranch:start_listener(the_socket, 50,
                             ranch_tcp, [{port, Port}], dotted_db_socket, []),
 
             % add several stats to track and save in csv files
