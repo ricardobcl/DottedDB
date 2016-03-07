@@ -66,7 +66,7 @@ start_bench() ->
 
 %% @doc Store the time at which the benchmark started
 end_bench(Args) ->
-    gen_server:call(?MODULE, {end_bench, Args}).
+    gen_server:cast(?MODULE, {end_bench, Args}).
 
 %% @doc Starts the timer that flush the data to disk.
 start() ->
@@ -106,14 +106,6 @@ handle_call(start_bench, _From, State) ->
     Now = os:timestamp(),
     {reply, ok, State#state{bench = on, bench_start = Now}};
 
-handle_call({end_bench, _Args}, _From, State=#state{bench = off}) ->
-    lager:info("Bench already ended!"),
-    {reply, ok, State};
-handle_call({end_bench, Args}, _From, State=#state{bench = on}) ->
-    StartTime = State#state.bench_start,
-    EndTime = os:timestamp(),
-    save_bench_file(StartTime, EndTime, Args, State),
-    {reply, ok, State#state{bench = off}};
 
 handle_call(start, _From, State) ->
     %% Schedule next report (repeatedly calls `self() ! report`)
@@ -150,6 +142,15 @@ handle_call(new_dir, _From, State) ->
 
 
 %% Asynchronous calls
+
+handle_cast({end_bench, _Args}, State=#state{bench = off}) ->
+    lager:info("Bench already ended!"),
+    {noreply, State};
+handle_cast({end_bench, Args}, State=#state{bench = on}) ->
+    StartTime = State#state.bench_start,
+    EndTime = os:timestamp(),
+    save_bench_file(StartTime, EndTime, Args, State),
+    {noreply, State#state{bench = off}};
 
 %% Ignore notifications if active flag is set to false.
 handle_cast({notify,_,_}, State=#state{active = false}) ->
