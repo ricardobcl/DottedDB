@@ -100,6 +100,8 @@ commands(D=[<<"UPDATE">>, Bucket, Key, Value], S) ->
     Context = case (S#state.client):get_at_node({Bucket, Key}) of
         {ok, {_Values, Ctx}} ->
             Ctx;
+        {error, _Reason0} ->
+            [];
         {not_found, Ctx} ->
             Ctx
     end,
@@ -117,6 +119,8 @@ commands(D=[<<"DELETE">>, Bucket, Key], S) ->
     Context = case (S#state.client):get_at_node({Bucket, Key}) of
         {ok, {_Values, Ctx}} ->
             Ctx;
+        {error, _Reason0} ->
+            [];
         {not_found, Ctx} ->
             Ctx
     end,
