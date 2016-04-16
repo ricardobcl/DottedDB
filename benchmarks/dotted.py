@@ -481,6 +481,128 @@ def sync_size_plot(type, DS,DE,BS,BE):
     pp.close()
 
 
+
+## Repair Latency
+def sync_paper3():
+    basic = {}
+    basicX = {}
+    basicY = {}
+    basicY2 = {}
+    basic_ecdf = {}
+    dotted = {}
+    dottedX = {}
+    dottedY = {}
+    dottedY2 = {}
+    dotted_ecdf = {}
+
+    types = ['hhh','hhl','hlh','hll','lhh','lhl','llh','lll']
+    for t in types:
+        change_current_basic(cluster_path + 'cluster_basic/sync_'+t+'/')
+        basic[t] = load_cluster_basic_csv('write-latency_gauge.csv', False)
+        basicY[t] = basic[t][:,1]
+        basic_ecdf[t] = sm.distributions.ECDF(basicY[t])
+        basicX[t] = np.linspace(min(basicY[t]), max(basicY[t]))
+        basicY2[t] = basic_ecdf[t](basicX[t])
+
+    types2 = ['hh','hl','lh','ll']
+    for t in types2:
+        change_current_dotted(cluster_path + 'cluster_dotted/sync_'+t+'/')
+        dotted[t] = load_cluster_dotted_csv('write-latency_gauge.csv', False)
+        dottedY[t] = dotted[t][:,1]
+        dotted_ecdf[t] = sm.distributions.ECDF(dottedY[t])
+        dottedX[t] = np.linspace(min(dottedY[t]), max(dottedY[t]))
+        print "min ", min(dottedY[t])
+        dottedY2[t] = dotted_ecdf[t](dottedX[t])
+
+    ms = ['s','o','<','>','^','v','*','D','p']
+
+    plt.style.use('fivethirtyeight')
+    plt.rcParams.update({'font.size': 10})
+    fig = plt.figure()
+    plt.title("10000 ms Sync Interval, 100% Replication Loss")
+    t1 = 'hhh'
+    t2 = 'lhh'
+    t3 =  'hh'
+    plt.step(basicX[t1]/1000.0, basicY2[t1], label="BasicDB, High MT/Leaf Ratio", lw=2, marker=ms[0])
+    plt.step(basicX[t2]/1000.0, basicY2[t2], label="BasicDB, Low MT/Leaf Ratio", lw=2, marker=ms[1])
+    plt.step(dottedX[t3]/1000.0, dottedY2[t3], label="DottedDB", lw=2, marker=ms[3])
+    plt.xlabel('Time (Seconds)')
+    # plt.ylabel('Size (KB)')
+    plt.legend(loc='lower right')
+    plt.xlim(xmin=-0.5)
+    # plt.xlim(xmax=10)
+    plt.ylim(ymax=1.05)
+    pp = PdfPages(test_path + 'repair_latency_hh_paper.pdf')
+    pp.savefig()
+    pp.close()
+
+
+    plt.style.use('fivethirtyeight')
+    plt.rcParams.update({'font.size': 10})
+    fig = plt.figure()
+    plt.title("10000 ms Sync Interval, 20% Replication Loss")
+    t1 = 'hhl'
+    t2 = 'lhl'
+    t3 =  'hl'
+    plt.step(basicX[t1]/1000.0, basicY2[t1], label="BasicDB, High MT/Leaf Ratio", lw=2, marker=ms[0])
+    plt.step(basicX[t2]/1000.0, basicY2[t2], label="BasicDB, Low MT/Leaf Ratio", lw=2, marker=ms[1])
+    plt.step(dottedX[t3]/1000.0, dottedY2[t3], label="DottedDB", lw=2, marker=ms[3])
+    plt.xlabel('Time (Seconds)')
+    # plt.ylabel('Size (KB)')
+    plt.legend(loc='lower right')
+    plt.xlim(xmin=-0.5)
+    # plt.xlim(xmax=10)
+    plt.ylim(ymax=1.05)
+    pp = PdfPages(test_path + 'repair_latency_hl_paper.pdf')
+    pp.savefig()
+    pp.close()
+
+
+    plt.style.use('fivethirtyeight')
+    plt.rcParams.update({'font.size': 10})
+    fig = plt.figure()
+    plt.title("100 ms Sync Interval, 100% Replication Loss")
+    t1 = 'hlh'
+    t2 = 'llh'
+    t3 =  'lh'
+    plt.step(basicX[t1]/1000.0, basicY2[t1], label="BasicDB, High MT/Leaf Ratio", lw=2, marker=ms[0])
+    plt.step(basicX[t2]/1000.0, basicY2[t2], label="BasicDB, Low MT/Leaf Ratio", lw=2, marker=ms[1])
+    plt.step(dottedX[t3]/1000.0, dottedY2[t3], label="DottedDB", lw=2, marker=ms[3])
+    plt.xlabel('Time (Seconds)')
+    # plt.ylabel('Size (KB)')
+    plt.legend(loc='lower right')
+    plt.xlim(xmin=-0.5)
+    # plt.xlim(xmax=10)
+    plt.ylim(ymax=1.05)
+    pp = PdfPages(test_path + 'repair_latency_lh_paper.pdf')
+    pp.savefig()
+    pp.close()
+
+
+    plt.style.use('fivethirtyeight')
+    plt.rcParams.update({'font.size': 10})
+    fig = plt.figure()
+    plt.title("100 ms Sync Interval, 20% Replication Loss")
+    t1 = 'hll'
+    t2 = 'lll'
+    t3 =  'll'
+    plt.step(basicX[t1]/1000.0, basicY2[t1], label="BasicDB, High MT/Leaf Ratio", lw=2, marker=ms[0])
+    plt.step(basicX[t2]/1000.0, basicY2[t2], label="BasicDB, Low MT/Leaf Ratio", lw=2, marker=ms[1])
+    plt.step(dottedX[t3]/1000.0, dottedY2[t3], label="DottedDB", lw=2, marker=ms[3])
+    plt.xlabel('Time (Seconds)')
+    # plt.ylabel('Size (KB)')
+    plt.legend(loc='lower right')
+    # plt.yscale('log')
+    # plt.xscale('log')
+    plt.xlim(xmin=-0.5)
+    # plt.xlim(xmax=10)
+    plt.ylim(ymax=1.05)
+    pp = PdfPages(test_path + 'repair_latency_ll_paper.pdf')
+    pp.savefig()
+    pp.close()
+
+
+
 def repair_latency_plot(type, DS,DE,BS,BE):
     if type == 'cluster':
         basic = load_cluster_basic_csv('write-latency_gauge.csv', False)
@@ -576,37 +698,37 @@ def strip_paper():
     delete_ecdf = sm.distributions.ECDF(deleteY)
     deleteX = np.linspace(min(deleteY), max(deleteY))
     deleteY2 = delete_ecdf(deleteX)
-    plt.step(deleteX/1000.0, deleteY2, label="10000ms Strip Interval, 100% Message Loss", lw=2)
+    plt.step(deleteX/1000.0, deleteY2, label="10000 ms Strip Interval, 100% Message Loss", lw=2, marker='o')
 
     deleteY = delete_hl[:,1]
     delete_ecdf = sm.distributions.ECDF(deleteY)
     deleteX = np.linspace(min(deleteY), max(deleteY))
     deleteY2 = delete_ecdf(deleteX)
-    plt.step(deleteX/1000.0, deleteY2, label="10000ms Strip Interval, 10% Message Loss", lw=2)
+    plt.step(deleteX/1000.0, deleteY2, label="10000 ms Strip Interval, 10% Message Loss", lw=2, marker='*')
 
     deleteY = delete_mh[:,1]
     delete_ecdf = sm.distributions.ECDF(deleteY)
     deleteX = np.linspace(min(deleteY), max(deleteY))
     deleteY2 = delete_ecdf(deleteX)
-    plt.step(deleteX/1000.0, deleteY2, label="1000ms Strip Interval, 100% Message LossMH", lw=2)
+    plt.step(deleteX/1000.0, deleteY2, label="1000 ms Strip Interval, 100% Message Loss", lw=2, marker='s')
 
     deleteY = delete_ml[:,1]
     delete_ecdf = sm.distributions.ECDF(deleteY)
     deleteX = np.linspace(min(deleteY), max(deleteY))
     deleteY2 = delete_ecdf(deleteX)
-    plt.step(deleteX/1000.0, deleteY2, label="1000ms Strip Interval, 10% Message LossML", lw=2)
+    plt.step(deleteX/1000.0, deleteY2, label="1000 ms Strip Interval, 10% Message Loss", lw=2, marker='^')
 
     deleteY = delete_lh[:,1]
     delete_ecdf = sm.distributions.ECDF(deleteY)
     deleteX = np.linspace(min(deleteY), max(deleteY))
     deleteY2 = delete_ecdf(deleteX)
-    plt.step(deleteX/1000.0, deleteY2, label="100ms Strip Interval, 100% Message LossLH", lw=2)
+    plt.step(deleteX/1000.0, deleteY2, label="100 ms Strip Interval, 100% Message Loss", lw=2, marker='v')
 
     deleteY = delete_ll[:,1]
     delete_ecdf = sm.distributions.ECDF(deleteY)
     deleteX = np.linspace(min(deleteY), max(deleteY))
     deleteY2 = delete_ecdf(deleteX)
-    plt.step(deleteX/1000.0, deleteY2, label="100ms Strip Interval, 10% Message Loss", lw=2)
+    plt.step(deleteX/1000.0, deleteY2, label="100 ms Strip Interval, 10% Message Loss", lw=2, marker='D')
 
     # writeY = write_hh[:,1]
     # write_ecdf = sm.distributions.ECDF(writeY)
@@ -643,43 +765,38 @@ def strip_paper():
     write_ecdf = sm.distributions.ECDF(writeY)
     writeX = np.linspace(min(writeY), max(writeY))
     writeY2 = write_ecdf(writeX)
-    plt.step(writeX/1000.0, writeY2, label="10000ms Strip Interval, 100% Message Loss", lw=2)
+    plt.step(writeX/1000.0, writeY2, label="10000 ms Strip Interval, 100% Message Loss", lw=2, marker='o')
 
     writeY = write_hl[:,1]
     write_ecdf = sm.distributions.ECDF(writeY)
     writeX = np.linspace(min(writeY), max(writeY))
     writeY2 = write_ecdf(writeX)
-    plt.step(writeX/1000.0, writeY2, label="10000ms Strip Interval, 10% Message Loss", lw=2)
+    plt.step(writeX/1000.0, writeY2, label="10000 ms Strip Interval, 10% Message Loss", lw=2, marker='*')
 
     writeY = write_mh[:,1]
     write_ecdf = sm.distributions.ECDF(writeY)
     writeX = np.linspace(min(writeY), max(writeY))
     writeY2 = write_ecdf(writeX)
-    plt.step(writeX/1000.0, writeY2, label="1000ms Strip Interval, 100% Message LossMH", lw=2)
+    plt.step(writeX/1000.0, writeY2, label="1000 ms Strip Interval, 100% Message Loss", lw=2, marker='s')
 
     writeY = write_ml[:,1]
     write_ecdf = sm.distributions.ECDF(writeY)
     writeX = np.linspace(min(writeY), max(writeY))
     writeY2 = write_ecdf(writeX)
-    plt.step(writeX/1000.0, writeY2, label="1000ms Strip Interval, 10% Message LossML", lw=2)
+    plt.step(writeX/1000.0, writeY2, label="1000 ms Strip Interval, 10% Message Loss", lw=2, marker='^')
 
     writeY = write_lh[:,1]
     write_ecdf = sm.distributions.ECDF(writeY)
     writeX = np.linspace(min(writeY), max(writeY))
     writeY2 = write_ecdf(writeX)
-    plt.step(writeX/1000.0, writeY2, label="100ms Strip Interval, 100% Message LossLH", lw=2)
+    plt.step(writeX/1000.0, writeY2, label="100 ms Strip Interval, 100% Message Loss", lw=2, marker='v')
 
     writeY = write_ll[:,1]
     write_ecdf = sm.distributions.ECDF(writeY)
     writeX = np.linspace(min(writeY), max(writeY))
     writeY2 = write_ecdf(writeX)
-    plt.step(writeX/1000.0, writeY2, label="100ms Strip Interval, 10% Message Loss", lw=2)
+    plt.step(writeX/1000.0, writeY2, label="100 ms Strip Interval, 10% Message Loss", lw=2, marker='D')
 
-    # writeY = write_hh[:,1]
-    # write_ecdf = sm.distributions.ECDF(writeY)
-    # writeX = np.linspace(min(writeY), max(writeY))
-    # writeY2 = write_ecdf(writeX)
-    # plt.step(writeX/1000.0, writeY2, label="Writes")
 
     plt.xlabel('Time (Seconds)')
     plt.legend(loc='lower right')
@@ -690,118 +807,6 @@ def strip_paper():
     pp.savefig()
     pp.close()
 
-
-
-
-#     plt.subplot(162)
-#     plt.title("HL")
-
-#     # if delete_ll.shape != (0,):
-#     deleteY = delete_hl[:,1]
-#     delete_ecdf = sm.distributions.ECDF(deleteY)
-#     deleteX = np.linspace(min(deleteY), max(deleteY))
-#     deleteY2 = delete_ecdf(deleteX)
-#     plt.step(deleteX/1000.0, deleteY2, label="Deletes")
-
-#     writeY = write_hl[:,1]
-#     write_ecdf = sm.distributions.ECDF(writeY)
-#     writeX = np.linspace(min(writeY), max(writeY))
-#     writeY2 = write_ecdf(writeX)
-#     plt.step(writeX/1000.0, writeY2, label="Writes")
-
-#     plt.xlabel('Time (Seconds)')
-#     # plt.legend(loc='center right')
-#     plt.xlim(xmax=15)
-
-
-#     plt.subplot(163)
-#     plt.title("MH")
-
-#     # if delete_ll.shape != (0,):
-#     deleteY = delete_mh[:,1]
-#     delete_ecdf = sm.distributions.ECDF(deleteY)
-#     deleteX = np.linspace(min(deleteY), max(deleteY))
-#     deleteY2 = delete_ecdf(deleteX)
-#     plt.step(deleteX/1000.0, deleteY2, label="Deletes")
-
-#     writeY = write_mh[:,1]
-#     write_ecdf = sm.distributions.ECDF(writeY)
-#     writeX = np.linspace(min(writeY), max(writeY))
-#     writeY2 = write_ecdf(writeX)
-#     plt.step(writeX/1000.0, writeY2, label="Writes")
-
-#     plt.xlabel('Time (Seconds)')
-#     # plt.legend(loc='center right')
-#     plt.xlim(xmax=15)
-
-
-#     plt.subplot(164)
-#     plt.title("ML")
-
-#     # if delete_ll.shape != (0,):
-#     deleteY = delete_ml[:,1]
-#     delete_ecdf = sm.distributions.ECDF(deleteY)
-#     deleteX = np.linspace(min(deleteY), max(deleteY))
-#     deleteY2 = delete_ecdf(deleteX)
-#     plt.step(deleteX/1000.0, deleteY2, label="Deletes")
-
-#     writeY = write_ml[:,1]
-#     write_ecdf = sm.distributions.ECDF(writeY)
-#     writeX = np.linspace(min(writeY), max(writeY))
-#     writeY2 = write_ecdf(writeX)
-#     plt.step(writeX/1000.0, writeY2, label="Writes")
-
-#     plt.xlabel('Time (Seconds)')
-#     # plt.legend(loc='center right')
-#     plt.xlim(xmax=15)
-
-
-#     plt.subplot(165)
-#     plt.title("LH")
-
-#     # if delete_ll.shape != (0,):
-#     deleteY = delete_lh[:,1]
-#     delete_ecdf = sm.distributions.ECDF(deleteY)
-#     deleteX = np.linspace(min(deleteY), max(deleteY))
-#     deleteY2 = delete_ecdf(deleteX)
-#     plt.step(deleteX/1000.0, deleteY2, label="Deletes")
-
-#     writeY = write_lh[:,1]
-#     write_ecdf = sm.distributions.ECDF(writeY)
-#     writeX = np.linspace(min(writeY), max(writeY))
-#     writeY2 = write_ecdf(writeX)
-#     plt.step(writeX/1000.0, writeY2, label="Writes")
-
-#     plt.xlabel('Time (Seconds)')
-#     # plt.legend(loc='center right')
-#     plt.xlim(xmax=15)
-
-
-#     plt.subplot(166)
-#     plt.title("LL")
-
-#     # if delete_ll.shape != (0,):
-#     deleteY = delete_ll[:,1]
-#     delete_ecdf = sm.distributions.ECDF(deleteY)
-#     deleteX = np.linspace(min(deleteY), max(deleteY))
-#     deleteY2 = delete_ecdf(deleteX)
-#     plt.step(deleteX/1000.0, deleteY2, label="Deletes")
-
-#     writeY = write_ll[:,1]
-#     write_ecdf = sm.distributions.ECDF(writeY)
-#     writeX = np.linspace(min(writeY), max(writeY))
-#     writeY2 = write_ecdf(writeX)
-#     plt.step(writeX/1000.0, writeY2, label="Writes")
-
-#     plt.xlabel('Time (Seconds)')
-#     # plt.legend(loc='center right')
-#     plt.xlim(xmax=15)
-
-    # plt.axes().set_aspect('equal', adjustable='box')
-
-    # pp = PdfPages(test_path + '/strip_paper.pdf')
-    # pp.savefig()
-    # pp.close()
 
 
 def strip_latency_plot(type, DS,DE,BS,BE):
@@ -946,81 +951,129 @@ def number_keys_plot(type, DS,DE,BS,BE,NVnodes,RF):
     pp.savefig()
     pp.close()
 
-def sync_paper():
-    change_current_basic(cluster_path + 'cluster_basic/sync_hhh/')
-    change_current_dotted(cluster_path + 'cluster_dotted/sync_hh/')
-
-    basic_m2 = load_cluster_basic_csv('sync-segment-keys-missing_hist.csv', False)
-    basic_tm2 = load_cluster_basic_csv('sync-segment-keys-truly-missing_hist.csv', False)
-    dotted2 = load_cluster_dotted_csv('sync-hit-ratio_hist.csv', False)
-    dotted_m2 = load_cluster_dotted_csv('sync-sent-missing_hist.csv', False)
-    dotted_tm2 = load_cluster_dotted_csv('sync-sent-truly-missing_hist.csv', False)
-
-    basic_m = mean_matrix(basic_m2)
-    basic_tm = mean_matrix(basic_tm2)
-    basic = join_matrix(basic_m, basic_tm)
-    # print "\n basic before: " + str(basic.shape) + "\n after: " + str(basic_tm.shape) + "\n\n"
-
-    dotted = mean_matrix(dotted2)
-    # print "\n dotted before: " + str(dotted2.shape) + "\n after: " + str(dotted.shape)
-
-    dotted_m = mean_matrix(dotted_m2)
-    dotted_tm = mean_matrix(dotted_tm2)
-    dotted3 = join_matrix(dotted_m, dotted_tm)
-    # print "\n dotted3 before: " + str(dotted3.shape) + "\n after: " + str(dotted_tm.shape) + "\n\n"
+def correct_hit_ratio(m):
+    for row in m:
+        if row[2] == 0:
+            row[4] = 100
 
 
+## Hit Ratio
+def sync_paper1():
+    initial_offset= -1
+    final_offset= 0
 
 
-    # change_current_basic(cluster_path + 'cluster_basic/sync_hhl/')
-    # change_current_dotted(cluster_path + 'cluster_dotted/sync_hl/')
+    # Basic
+    basic_m2 = {}
+    basic_tm2 = {}
+    basic_m = {}
+    basic_tm = {}
+    basic = {}
+    basic_pct0 = {}
+    basic_pct = {}
+    BS = {}
+    BE = {}
+    DS = {}
+    DE = {}
+    NVnodes = {}
+    RF = {}
+    dotted = {}
+    dotted2 = {}
+    dotted_m2 = {}
+    dotted_tm2 = {}
+    dotted_m = {}
+    dotted_tm = {}
+    dotted3 = {}
 
-    # change_current_basic(cluster_path + 'cluster_basic/sync_hlh/')
-    # change_current_dotted(cluster_path + 'cluster_dotted/sync_lh/')
+    types = ['hhh','hhl','hlh','hll','lhh','lhl','llh','lll']
+    for t in types:
+        change_current_basic(cluster_path + 'cluster_basic/sync_'+t+'/')
 
-    # change_current_basic(cluster_path + 'cluster_basic/sync_hll/')
-    # change_current_dotted(cluster_path + 'cluster_dotted/sync_ll/')
+        basic_bench = np.loadtxt((current_basic_dir +'/node1/bench_file.csv'), delimiter=':', usecols=[1])
+        BS[t] = int(basic_bench[0]/5)-initial_offset
+        BE[t] = int(basic_bench[1]/5)+final_offset
+        NVnodes[t] = int(basic_bench[6])
+        RF[t] = int(basic_bench[7])
 
-    # change_current_basic(cluster_path + 'cluster_basic/sync_lhh/')
-    # change_current_basic(cluster_path + 'cluster_basic/sync_lhl/')
-    # change_current_basic(cluster_path + 'cluster_basic/sync_llh/')
-    # change_current_basic(cluster_path + 'cluster_basic/sync_lll/')
+        basic_m2[t] = load_cluster_basic_csv('sync-segment-keys-missing_hist.csv', False)
+        basic_tm2[t] = load_cluster_basic_csv('sync-segment-keys-truly-missing_hist.csv', False)
+        basic_m[t] = mean_matrix(basic_m2[t])
+        basic_tm[t] = mean_matrix(basic_tm2[t])
+        basic[t] = join_matrix(basic_m[t], basic_tm[t])
+        basic_pct0[t] = basic[t][BS[t]:BE[t],22]*100/(basic[t][BS[t]:BE[t],10]*1.0)
+        basic_pct[t] = np.array(map(lambda x: min(x,100), basic_pct0[t]))
 
-    initial_offset= 12
-    final_offset= 35
-    dotted_bench = np.loadtxt((current_dotted_dir +'/node1/bench_file.csv'), delimiter=':', usecols=[1])
-    DS = int(dotted_bench[0]/5)-initial_offset
-    DE = int(dotted_bench[1]/5)+final_offset
-    basic_bench = np.loadtxt((current_basic_dir +'/node1/bench_file.csv'), delimiter=':', usecols=[1])
-    BS = int(basic_bench[0]/5)-initial_offset
-    BE = int(basic_bench[1]/5)+final_offset
-    NVnodes = int(basic_bench[6])
-    RF = int(basic_bench[7])
+
+    types2 = ['hh','hl','lh','ll']
+    for t in types2:
+        change_current_dotted(cluster_path + 'cluster_dotted/sync_'+t+'/')
+
+        dotted_bench = np.loadtxt((current_dotted_dir +'/node1/bench_file.csv'), delimiter=':', usecols=[1])
+        DS[t] = int(dotted_bench[0]/5)-initial_offset
+        DE[t] = int(dotted_bench[1]/5)+final_offset
+
+        dotted2[t] = load_cluster_dotted_csv('sync-hit-ratio_hist.csv', False)
+        correct_hit_ratio(dotted2[t])
+        dotted[t] = mean_matrix(dotted2[t])
+
+        # dotted_m2[t] = load_cluster_dotted_csv('sync-sent-missing_hist.csv', False)
+        # dotted_tm2[t] = load_cluster_dotted_csv('sync-sent-truly-missing_hist.csv', False)
+        # dotted_m[t] = mean_matrix(dotted_m2[t])
+        # dotted_tm[t] = mean_matrix(dotted_tm2[t])
+        # dotted3[t] = join_matrix(dotted_m[t], dotted_tm[t])
+
 
     plt.style.use('fivethirtyeight')
+    plt.rcParams.update({'font.size': 10})
+
+
     fig = plt.figure()
-    fig.add_axes([0.13, 0.10, 0.85, 0.8])
-    plt.title("")
-    me = 10
-
-    basic_pct0 = basic[BS:BE,22]*100/(basic[BS:BE,10]*1.0)
-    basic_pct = np.array(map(lambda x: min(x,100), basic_pct0))
-    plt.plot(basic[BS:BE,0]-5*BS, basic_pct, linewidth=2, label='BasicDB HHH', c='r', marker='^', markevery=me)
-    plt.plot(dotted3[DS:DE,0]-5*DS, dotted3[DS:DE,22]*100/(dotted3[DS:DE,10]*1.0), linewidth=2, label='Dotted3 HH', c='b', marker='x', markevery=5)
-    plt.plot(dotted[DS:DE,0]-5*DS, dotted[DS:DE,4], linewidth=2, label='DottedDB HH', c='g', marker='o', markevery=5)
-
-    plt.xlabel('Time')
+    # fig.add_axes([0.13, 0.10, 0.85, 0.8])
+    plt.title("Hit Ratio for BasicDB")
+    ms = ['s','o','<','>','^','v','*','D','p']
+    i = 0
+    for t in types:
+        plt.plot(basic[t][BS[t]:BE[t],0]-5*BS[t], basic_pct[t], linewidth=2, label='BasicDB, '+t.upper(), c='r', markersize=4, marker=ms[i], markevery=7)
+        i = i + 1
+    plt.xlabel('Time (Seconds)')
     plt.ylabel('Percentage (%)')
-    plt.legend(loc='lower left')
-    # plt.ylim(ymin=-150.0)
-    plt.ylim((-1,102))
-    plt.xlim(xmin=0)
-    plt.xlim(xmax=(BE-BS)*5)
-    # plt.xlim(xmax=1375)
-    # save in PDF
-    pp = PdfPages(test_path + 'hit_ratio_paper.pdf')
+    plt.legend(loc='center right')
+    plt.ylim((-1,62))
+    plt.xlim(xmin=-5)
+    plt.xlim(xmax=(BE['hhh']-BS['hhh'])*5)
+    pp = PdfPages(test_path + 'basic_hit_ratio_paper.pdf')
     pp.savefig()
     pp.close()
+
+
+
+
+    fig = plt.figure()
+    # fig.add_axes([0.13, 0.10, 0.85, 0.8])
+    plt.title("Hit Ratio for DottedDB")
+    ms = ['s','o','<','>','^','v','*','D','p']
+    i = 0
+    for t in types2:
+        # plt.plot(dotted3[t][DS[t]:DE[t],0]-5*DS[t], dotted3[t][DS[t]:DE[t],22]*100/(dotted3[t][DS[t]:DE[t],10]*1.0), linewidth=1, label='Dotted3, '+t, c='b', markersize=4, marker=ms[i], markevery=7)
+        i = i + 1
+        plt.plot(dotted[t][DS[t]:DE[t],0]-5*DS[t], dotted[t][DS[t]:DE[t],4], linewidth=2, label='DottedDB, '+t.upper(), c='g', markersize=4, marker=ms[i], markevery=7)
+        i = i + 1
+    plt.xlabel('Time (Seconds)')
+    plt.ylabel('Percentage (%)')
+    plt.legend(loc='lower right')
+    # plt.ylim(ymin=-150.0)
+    plt.ylim((95,100.3))
+    plt.xlim(xmin=-5)
+    plt.xlim(xmax=(DE['hh']-DS['hh'])*5 - 10)
+    # plt.xlim(xmax=1375)
+    # save in PDF
+    pp = PdfPages(test_path + 'dotted_hit_ratio_paper.pdf')
+    pp.savefig()
+    pp.close()
+
+
+
+
 
 
 
@@ -1077,6 +1130,112 @@ def sync_hit_ratio_plot(type, DS,DE,BS,BE):
     pp.savefig()
     pp.close()
 
+
+
+## Sync Metadata
+def sync_paper2():
+    initial_offset= -1
+    final_offset= 0
+
+
+    # Basic
+    basic_mt = {}
+    basic = {}
+    BS = {}
+    BE = {}
+    DS = {}
+    DE = {}
+    num_keys = {}
+    vnodes = {}
+    RF = {}
+    hash_size = {}
+    key_size = {}
+    mt = {}
+    block_size = {}
+    basic_size = {}
+    dotted_bvv = {}
+    dotted_kl = {}
+    dotted_nsk = {}
+    dotted1 = {}
+    dotted2 = {}
+    dotted3 = {}
+
+    types = ['hhh','hhl','hlh','hll','lhh','lhl','llh','lll']
+    for t in types:
+        change_current_basic(cluster_path + 'cluster_basic/sync_'+t+'/')
+
+        basic_bench = np.loadtxt((current_basic_dir +'/node1/bench_file.csv'), delimiter=':', usecols=[1])
+        BS[t] = int(basic_bench[0]/5)-initial_offset
+        BE[t] = int(basic_bench[1]/5)+final_offset
+        num_keys[t] = int(basic_bench[2])
+        vnodes[t] = int(basic_bench[6])
+        RF[t] = int(basic_bench[7])
+        hash_size[t] = int(basic_bench[8])
+        key_size[t] = int(basic_bench[9])
+        mt[t] = int(basic_bench[10])
+        mt_metadata = 11
+        block_size[t] = mt_metadata + hash_size[t] + key_size[t]
+        basic_size[t] = (block_size[t] + mt[t]*block_size[t] + (mt[t]**2)*block_size[t] + (RF[t]*num_keys[t]/(vnodes[t]*1.0))*block_size[t]) * RF[t]
+
+        basic_mt[t] = load_cluster_basic_csv('mt-size_hist.csv', False)
+        basic[t] = mean_matrix(basic_mt[t])
+        # print "Shape dotter  ", basic[t].shape
+
+    types2 = ['hh','hl','lh','ll']
+    for t in types2:
+        change_current_dotted(cluster_path + 'cluster_dotted/sync_'+t+'/')
+
+        dotted_bench = np.loadtxt((current_dotted_dir +'/node1/bench_file.csv'), delimiter=':', usecols=[1])
+        DS[t] = int(dotted_bench[0]/5)-initial_offset
+        DE[t] = int(dotted_bench[1]/5)+final_offset
+
+        dotted_bvv[t] = load_cluster_dotted_csv('bvv-size_hist.csv', False)
+        dotted_kl[t] = load_cluster_dotted_csv('kl-size_hist.csv', False)
+        dotted_nsk[t] = load_cluster_dotted_csv('nsk-size_hist.csv', False)
+
+        dotted1[t] = mean_matrix(dotted_bvv[t])
+        dotted2[t] = mean_matrix(dotted_kl[t])
+        dotted3[t] = mean_matrix(dotted_nsk[t])
+
+
+
+    plt.style.use('fivethirtyeight')
+    plt.rcParams.update({'font.size': 8})
+    fig = plt.figure()
+    plt.title("Node Metadata Size")
+
+    # n_lines, _ = dotted1['hh'].shape
+    # basic_total = np.empty(n_lines)
+    # basic_total.fill(basic_size['hhh'])
+    # print str(basic_size['hhh']/1024.0) + " KB\n"
+    # plt.plot(dotted1['hh'][DS['hh']:DE['hh'],0]-DS['hh']*5, basic_total[DS['hh']:DE['hh']]/1024.0, linewidth=2, label='MT Theoretical Size', c='r', linestyle='--')
+
+    ms = ['s','o','<','>','^','v','*','D','p']
+    i = 0
+    for t in types:
+        plt.plot(basic[t][BS[t]:BE[t],0]-BS[t]*5, basic[t][BS[t]:BE[t],4]/1024.0, linewidth=1, label='BasicDB, '+t.upper(), c='r', marker=ms[i],markersize=4, markevery=7)
+        i = i + 1
+
+    i = 0
+    for t in types2:
+        dotted_total = (dotted1[t][:,4] + dotted2[t][:,4] + dotted3[t][:,4])
+        plt.plot(dotted1[t][DS[t]:DE[t],0]-DS[t]*5, dotted_total[DS[t]:DE[t]]/1024.0, linewidth=1, label='DottedDB, '+t.upper(), c='g', marker=ms[i], markersize=4,markevery=7)
+        i = i + 1
+
+    plt.xlabel('Time (Seconds)')
+    plt.ylabel('Size (KB)')
+    plt.legend(loc='upper right')
+    # plt.ylim((-1,62))
+    plt.xlim(xmin=-5)
+    plt.xlim(xmax=(BE['hhh']-BS['hhh'])*5)
+    plt.ylim(ymin=-5)
+    pp = PdfPages(test_path + 'sync_metadata_paper.pdf')
+    pp.savefig()
+    pp.close()
+
+
+
+
 def node_metadate_plot(type, DS, DE, BS, BE, bench):
     if type == 'cluster':
         dotted_bvv = load_cluster_dotted_csv('bvv-size_hist.csv', True)
@@ -1092,7 +1251,6 @@ def node_metadate_plot(type, DS, DE, BS, BE, bench):
     dotted1 = mean_matrix(dotted_bvv)
     dotted2 = mean_matrix(dotted_kl)
     dotted3 = mean_matrix(dotted_nsk)
-
 
     basic = mean_matrix(basic_mt)
 
@@ -1322,8 +1480,12 @@ def main(argv):
         clock_entries_paper()
     elif arg1 == 'deletes':
         deletes_paper()
-    elif arg1 == 'sync':
-        sync_paper()
+    elif arg1 == 'sync1':
+        sync_paper1()
+    elif arg1 == 'sync2':
+        sync_paper2()
+    elif arg1 == 'sync3':
+        sync_paper3()
     elif arg1 == 'strip':
         strip_paper()
     else:
