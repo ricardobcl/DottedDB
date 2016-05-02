@@ -292,11 +292,12 @@ save_gauge(StatName) ->
 
 save_bench_file(StartTime, EndTime, [SyncTime, ReplFail, NodeKill, StripInterval], Dir, Stime) ->
     dotted_db_utils:maybe_seed(),
-    Sec = random:uniform(10)+5,
+    Sec = random:uniform(5)+2,
     lager:info("Ending bench going to sleep ~p seconds!", [Sec]),
     timer:sleep(timer:seconds(Sec)),
 
-    NumKeys = dotted_db:all_keys(),
+    % NumKeys = dotted_db:all_keys(),
+    NumKeys = -1,
     {ok, Nvnodes} = application:get_env(riak_core, ring_creation_size),
     ST = round(timer:now_diff(StartTime, Stime) / 1000000),
     ET = round(timer:now_diff(EndTime, Stime) / 1000000),
