@@ -696,12 +696,13 @@ handle_sync_missing({sync_missing, ReqID, _, _}, State=#state{mode=recovering}) 
     {reply, {cancel, ReqID, recovering}, State};
 handle_sync_missing({sync_missing, ReqID, RemoteID={_,_}, LocalEntryInRemoteClock}, State=#state{mode=normal}) ->
     {RemoteIndex,_} = RemoteID,
-    % get the all the dots (only the counters) from the local node clock, with id equal to the local node
-    LocalDots = swc_node:values(swc_node:get(State#state.id, State#state.clock)),
-    % get the all the dots (only the counters) from the asking node clock, with id equal to the local node
-    RemoteDots =  swc_node:values(LocalEntryInRemoteClock),
+    % % get the all the dots (only the counters) from the local node clock, with id equal to the local node
+    % LocalDots = swc_node:values(swc_node:get(State#state.id, State#state.clock)),
+    % % get the all the dots (only the counters) from the asking node clock, with id equal to the local node
+    % RemoteDots =  swc_node:values(LocalEntryInRemoteClock),
     % calculate what dots are present locally that the asking node does not have
-    MissingDots = lists:usort(LocalDots -- RemoteDots),
+    MissingDots = swc_node:subtract_dots(swc_node:get(State#state.id, State#state.clock), LocalEntryInRemoteClock),
+    % MissingDots = lists:usort(LocalDots -- RemoteDots),
     {KBase, KeyList} = State#state.keylog,
     % get the keys corresponding to the missing dots,
     MissingKeys = [lists:nth(MDot-KBase, KeyList) || MDot <- MissingDots, MDot > KBase],
