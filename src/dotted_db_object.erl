@@ -71,12 +71,15 @@ strip(NodeClock, Object) ->
 
 -spec fill(key(), bvv(), object()) -> object().
 fill(Key, NodeClock, Object) ->
-    {D,VV} = get_container(Object),
+    % ReplicaNodes = dotted_db_utils:replica_nodes(Key),
+    % DCC = swc_kv:fill(get_container(Object), NodeClock, ReplicaNodes),
+    % set_container(DCC, Object).
     RNIndices = dotted_db_utils:replica_nodes_indices(Key),
     case ?REPLICATION_FACTOR == length(RNIndices) of
         true ->
             % only consider ids that belong to both the list of ids received and the NodeClock
             NodeVV = [{Id,N} || {Id={Index,_}, {N,_}} <- NodeClock, lists:member(Index, RNIndices)],
+            {D,VV} = get_container(Object),
             DCC = {D, swc_vv:join(VV, NodeVV)},
             set_container(DCC, Object);
         false ->

@@ -25,7 +25,7 @@
 -define(OPT_PUT_REPLICAS, put_replicas).
 -define(OPT_PUT_MIN_ACKS, put_acks).
 -define(REPLICATION_FAIL_RATIO, repl_fail_ratio).
--define(DEFAULT_REPLICATION_FAIL_RATIO, 0). % ratio of "lost" replicated put/deletes
+-define(DEFAULT_REPLICATION_FAIL_RATIO, 0.5). % ratio of "lost" replicated put/deletes
 
 %% Options for vnodes
 -define(REPORT_TICK_INTERVAL, 5000). % (ms) interval between report stats

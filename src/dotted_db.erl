@@ -777,6 +777,8 @@ compute_missing_dots([H1|T],L=[{_,H2}|_]) when H1 =/= H2 ->
 process_vnode_states(States) ->
     Results         = [ process_vnode_state(State) || State <- States ],
     Dots            = [ begin #{dots           := Res} = R , Res end || R<- Results ],
+    % EntriesWM       = [ begin #{entries_wm     := Res} = R , Res end || R<- Results ],
+    RetiredWM       = [ begin #{retired_wm     := Res} = R , Res end || R<- Results ],
     % ClockSize     = [ begin #{clock_size     := Res} = R , Res end || R<- Results ],
     ClockLen        = [ begin #{clock_len      := Res} = R , Res end || R<- Results ],
     Keys            = [ begin #{keys           := Res} = R , Res end || R<- Results ],
@@ -794,6 +796,10 @@ process_vnode_states(States) ->
     % io:format("\t All       clock size              \t ~p\n",[lists:sort(ClockSize)]),
     io:format("\t Average # entries in clock        \t ~p\n",[average(ClockLen)]),
     io:format("\t Per vnode # entries in clock      \t ~p\n",[lists:sort(ClockLen)]),
+    io:format("\t~s~s\n",color_good_if_zero(" Average # retired nodes in WM     \t ", average(RetiredWM))),
+    io:format("\t Per vnode # retired nodes WaterMark\t~p\n",[lists:sort(RetiredWM)]),
+    % io:format("\t Average   # entries WaterMark     \t ~p\n", [[average(X) || X <- EntriesWM]]),
+    % io:format("\t           # entries WaterMark     \t ~p\n", [[lists:sort(X) || X <- EntriesWM]]),
     io:format("\t~s~s\n",color_good_if_zero(" Average   # keys in KL            \t ", average(Keys))),
     io:format("\t Per vnode # keys in KL            \t ~p\n",[lists:sort(Keys)]),
     % io:format("\t Average   size keys in KL         \t ~p\n",[average(KLSize)]),
@@ -818,25 +824,46 @@ color_good_if_zero(Message, Number) ->
             end
     end.
 
-process_vnode_state({Index, _Node, {ok, vs, {state, _Id, _Atom, Index, NodeClock, _Storage,
-         _Replicated, KeyLog, NSK, _NSKInterval, RKeys, _Updates_mem, _Dets, _Stats, _Syncs, _Mode, _ReportInterval}}}) ->
+process_vnode_state({Index, _Node, {ok, vs, {state, Id, _Atom, Index, _PeersIds, NodeClock, _Storage,
+         Watermark, DotKeyMap, NSK, _NSKInterval, RKeys, _Updates_mem, _Dets, _Stats, _Syncs, _Mode, _ReportInterval}}}) ->
     % ?PRINT(NodeClock),
     MissingDots = [ miss_dots(Entry) || {_,Entry} <- NodeClock ],
-    {_,K} = KeyLog,
-    Keys = length(K),
-    Size = byte_size(term_to_binary(KeyLog)),
+    case average(MissingDots) > 0 of
+        true -> lager:warning("Clock fail for ~p:\n\t~p\n", [Id, NodeClock]);
+        false -> ok
+    end,
+    % case swc_dotkeymap:empty(DotKeyMap) of
+    %     true -> ok;
+    %     false ->
+    %         lager:info("Node ID: ~p\n\nNode Clock: ~p\n\nDKM: ~p\n\nWM: ~W\n\n",[Id, NodeClock, DotKeyMap, Watermark,99999])
+    % end,
+    Keys = swc_dotkeymap:size(DotKeyMap),
+    % case Keys of
+    %     0 -> lager:info("KDM zero: ~p\n", [DotKeyMap]);
+    %     _ -> ok
+    % end,
+    Size = byte_size(term_to_binary(DotKeyMap)),
     {Del,Wrt} = NSK,
     SizeNSK = byte_size(term_to_binary(NSK)),
     LengthNSK1 = length(Wrt),
     LengthNSK2 = lists:sum([dict:size(Dict) || {_,Dict} <- Wrt]) + length(Del),
+    % case LengthNSK2 of
+    %     0 -> ok;
+    %     _ -> lager:info("Clock: ~p\nNSK: ~p\n", [NodeClock, NSK])
+    % end,
     LengthRKeys = case RKeys of
         [] -> 0;
         _  ->
             {_NodeID, RecoverKeys} = hd(RKeys),
             length(RecoverKeys)
     end,
-    #{   
+    {WM, RetiredPeers} = Watermark,
+    EntriesInWatermark0 = orddict:map(fun (_,V) -> orddict:size(V) end, WM),
+    EntriesInWatermark = [V || {_,V} <- orddict:to_list(EntriesInWatermark0)],
+    #{
           dots          => average(MissingDots)
+        , entries_wm    => EntriesInWatermark
+        , retired_wm    => orddict:size(RetiredPeers)
         , clock_size    => byte_size(term_to_binary(NodeClock))
         , clock_len     => orddict:size(NodeClock)
         , keys          => Keys %length(Keys)

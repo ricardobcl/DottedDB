@@ -21,7 +21,9 @@
         ]).
 
 -export([
-            get_vnode_id/2,
+            get_vnode_id/1,
+            broadcast_my_peers_to_my_peers/3,
+            replace_peer/3,
             restart/2,
             inform_peers_restart/2,
             inform_peers_restart2/2,
@@ -31,7 +33,7 @@
             write/2,
             replicate/2,
             sync_start/2,
-            sync_missing/4,
+            sync_missing/5,
             sync_repair/2
         ]).
 
@@ -48,14 +50,16 @@
         atom_id     :: atom(),
         % index on the consistent hashing ring
         index       :: index(),
+        % my peers ids
+        peers_ids   :: [vnode_id()],
         % node logical clock
         clock       :: bvv(),
         % key->object store, where the object contains a DCC (values + logical clock)
         storage     :: dotted_db_storage:storage(),
-        % what peer nodes have from my coordinated writes (not real-time)
-        replicated  :: vv(),
-        % log for keys that this node coordinated a write (eventually older keys are safely pruned)
-        keylog      :: keylog(),
+        % what me and my peers know about me and their peers
+        watermark   :: vv_matrix(),
+        % map for keys that this node replicates (eventually all keys are safely pruned from this)
+        dotkeymap   :: key_matrix(),
         % the left list of pairs of deleted keys not yet stripped, and their causal context (version vector);
         % the right side is a list of (vnode, map), where the map is between dots and keys not yet completely stripped (and their VV also)
         non_stripped_keys :: {[{key(),vv()}], [{id(), dict:dict()}]},
@@ -95,9 +99,21 @@
 start_vnode(I) ->
     riak_core_vnode_master:get_vnode_pid(I, ?MODULE).
 
-get_vnode_id(IndexNodes, MyNodeID) ->
+get_vnode_id(IndexNodes) ->
     riak_core_vnode_master:command(IndexNodes,
-                                   {get_vnode_id, MyNodeID},
+                                   get_vnode_id,
+                                   {raw, undefined, self()},
+                                   ?MASTER).
+
+broadcast_my_peers_to_my_peers(IndexNodes, MyId, MyPeersIds) ->
+    riak_core_vnode_master:command(IndexNodes,
+                                   {broadcast_my_peers_to_my_peers, MyId, MyPeersIds},
+                                   {raw, undefined, self()},
+                                   ?MASTER).
+
+replace_peer(IndexNodes, OldPeerId, NewPeerId) ->
+    riak_core_vnode_master:command(IndexNodes,
+                                   {replace_peer, OldPeerId, NewPeerId},
                                    {raw, undefined, self()},
                                    ?MASTER).
 
@@ -155,9 +171,9 @@ sync_start(Node, ReqID) ->
                                    {fsm, undefined, self()},
                                    ?MASTER).
 
-sync_missing(Peer, ReqID, RemoteNodeID, RemoteEntry) ->
+sync_missing(Peer, ReqID, RemoteNodeID, RemoteClock, RemotePeers) ->
     riak_core_vnode_master:command(Peer,
-                                   {sync_missing, ReqID, RemoteNodeID, RemoteEntry},
+                                   {sync_missing, ReqID, RemoteNodeID, RemoteClock, RemotePeers},
                                    {fsm, undefined, self()},
                                    ?MASTER).
 
@@ -173,35 +189,40 @@ sync_repair(Node, Args) ->
 %%%===================================================================
 
 init([Index]) ->
+    put(watermark, false),
     process_flag(priority, high),
     % try to read the vnode state in the DETS file, if it exists
-    {Dets, NodeId2, NodeClock, KeyLog, Replicated, NonStrippedKeys} =
+    {Dets, NodeId2, NodeClock, DotKeyMap, Watermark, NonStrippedKeys} =
         case read_vnode_state(Index) of
             {Ref, not_found} -> % there isn't a past vnode state stored
                 lager:debug("No persisted state for vnode index: ~p.",[Index]),
+                NodeId = new_vnode_id(Index),
                 Clock = swc_node:new(),
-                KLog  = {0,[]},
-                Repli = [],
-                {Ref, new_vnode_id(Index), Clock, KLog, Repli, {[],[]}};
+                KLog  = swc_dotkeymap:new(),
+                Repli = swc_watermark:new(),
+                {Ref, NodeId, Clock, KLog, Repli, {[],[]}};
             {Ref, error, Error} -> % some unexpected error
                 lager:error("Error reading vnode state from storage: ~p", [Error]),
+                NodeId = new_vnode_id(Index),
                 Clock = swc_node:new(),
-                KLog  = {0,[]},
-                Repli = [],
-                {Ref, new_vnode_id(Index), Clock, KLog, Repli, {[],[]}};
-            {Ref, {Id, Clock, KLog, Repli, NSK}} -> % we have vnode state in the storage
+                KLog  = swc_dotkeymap:new(),
+                Repli = swc_watermark:new(),
+                {Ref, NodeId, Clock, KLog, Repli, {[],[]}};
+            {Ref, {Id, Clock, DKMap, Repli, NSK}} -> % we have vnode state in the storage
                 lager:info("Recovered state for vnode ID: ~p.",[Id]),
-                {Ref, Id, Clock, KLog, Repli, NSK}
+                {Ref, Id, Clock, DKMap, Repli, NSK}
         end,
     % open the storage backend for the key-values of this vnode
-    {Storage, NodeId3, NodeClock2, KeyLog2, Replicated2, NonStrippedKeys2} =
+    {Storage, NodeId3, NodeClock2, DotKeyMap2, Watermark2, NonStrippedKeys2} =
         case open_storage(Index) of
             {{backend, ets}, S} ->
                 % if the storage is in memory, start with an "empty" vnode state
-                {S, new_vnode_id(Index), swc_node:new(), {0,[]}, [], {[],[]}};
+                NodeId4 = new_vnode_id(Index),
+                {S, NodeId4, swc_node:new(), swc_dotkeymap:new(), swc_watermark:new(), {[],[]}};
             {_, S} ->
-                {S, NodeId2,NodeClock, KeyLog, Replicated, NonStrippedKeys}
+                {S, NodeId2,NodeClock, DotKeyMap, Watermark, NonStrippedKeys}
         end,
+    PeersIDs = ordsets:del_element(NodeId3, ordsets:from_list(swc_watermark:peers(Watermark2))),
     % create an ETS to store keys written and deleted in this node (for stats)
     AtomID = create_ets_all_keys(NodeId3),
     % schedule a periodic reporting message (wait 2 seconds initially)
@@ -213,9 +234,10 @@ init([Index]) ->
         id                      = NodeId3,
         atom_id                 = AtomID,
         index                   = Index,
+        peers_ids               = PeersIDs,
         clock                   = NodeClock2,
-        replicated              = Replicated2,
-        keylog                  = KeyLog2,
+        watermark               = Watermark2,
+        dotkeymap               = DotKeyMap2,
         non_stripped_keys       = NonStrippedKeys2,
         buffer_strip_interval   = ?BUFFER_STRIP_INTERVAL,
         recover_keys            = [],
@@ -261,7 +283,7 @@ handle_command(Cmd={replicate, _Args}, _Sender, State) ->
 handle_command(Cmd={sync_start, _ReqID}, _Sender, State) ->
     handle_sync_start(Cmd, State);
 
-handle_command(Cmd={sync_missing, _ReqID, _RemoteID, _LocalEntryInRemoteClock}, _Sender, State) ->
+handle_command(Cmd={sync_missing, _ReqID, _RemoteID, _RemoteClock, _RemotePeers}, _Sender, State) ->
     handle_sync_missing(Cmd, State);
 
 handle_command(Cmd={sync_repair, _Args}, _Sender, State) ->
@@ -277,11 +299,11 @@ handle_command(Cmd={restart, _ReqID}, _Sender, State) ->
     handle_restart(Cmd, State);
 
 %% On the good nodes
-handle_command(Cmd={inform_peers_restart, {_ReqID, _RestartingVnode, _OldVnodeID, _NewVnodeID, _RemoteBase}}, _Sender, State) ->
+handle_command(Cmd={inform_peers_restart, {_ReqID, _RestartingNodeIndex, _OldVnodeID, _NewVnodeID}}, _Sender, State) ->
     handle_inform_peers_restart(Cmd, State);
 
 %% On the restarting node
-handle_command(Cmd={recover_keys, {_ReqID, _RemoteVnode, _RemoteVnodeId, _RemoteClock, _Objects, _LastBatch}}, _Sender, State) ->
+handle_command(Cmd={recover_keys, {_ReqID, _RemoteVnode, _RemoteVnodeId, _RemoteClock, _Objects, _RemoteWatermark, _LastBatch}}, _Sender, State) ->
     handle_recover_keys(Cmd, State);
 
 %% On the good nodes
@@ -305,9 +327,31 @@ handle_command({set_stats, NewStats}, _Sender, State) ->
     lager:info("Vnode stats => from: ~p \t to: ~p",[OldStats, NewStats]),
     {noreply, State#state{stats=NewStats}};
 
-handle_command({get_vnode_id, RemoteID}, _Sender, State) ->
-    RemoteCounter = swc_vv:get(RemoteID, State#state.replicated),
-    {reply, {get_vnode_id, {State#state.index, node()}, State#state.id, RemoteCounter}, State};
+handle_command(get_vnode_id, _Sender, State) ->
+    {reply, {get_vnode_id, {State#state.index, node()}, State#state.id}, State};
+
+handle_command({broadcast_my_peers_to_my_peers, MyPeer, MyPeerPeers}, _Sender, State) ->
+    Watermark = swc_watermark:add_peer(State#state.watermark, MyPeer, MyPeerPeers),
+    case length(swc_watermark:peers(Watermark)) == (?REPLICATION_FACTOR*2)-1 of
+        true ->
+            put(watermark, true),
+            lager:info("Peers 2 peers 4 watermark -> DONE!!!");
+        false ->
+            % lager:info("Getting my peer's peers ~p/~p",[orddict:size(Watermark), (?REPLICATION_FACTOR*2)-1]),
+            ok
+    end,
+    {noreply, State#state{watermark=Watermark}};
+
+handle_command({replace_peer, OldPeerId, NewPeerId}, _Sender, State) ->
+    NewPeersIds =
+        case ordsets:is_element(OldPeerId, State#state.peers_ids) of
+            true  -> ordsets:add_element(NewPeerId, ordsets:del_element(OldPeerId, State#state.peers_ids));
+            false -> State#state.peers_ids
+        end,
+    % NewWatermark = swc_watermark:replace_peer(State#state.watermark, OldPeerId, NewPeerId),
+    add_removed_vnode_jump_clock(OldPeerId),
+    NewWatermark = swc_watermark:retire_peer(State#state.watermark, OldPeerId, NewPeerId),
+    {noreply, State#state{peers_ids=NewPeersIds, watermark=NewWatermark}};
 
 handle_command(Message, _Sender, State) ->
     lager:info("Unhandled Command ~p", [Message]),
@@ -402,14 +446,23 @@ handle_coverage(Req, _KeySpaces, _Sender, State) ->
     {noreply, State}.
 
 
-handle_info({undefined,{get_vnode_id, IndexNode={Index,_}, VnodeID={Index,_}, MyRemoteCounter}}, State) ->
-    lager:info("New vnode id for Replicated SWc_VV: ~p ", [VnodeID]),
+handle_info({undefined,{get_vnode_id, IndexNode={Index,_}, PeerId={Index,_}}}, State) ->
+    % lager:info("New vnode id for watermark: ~p ", [PeerId]),
     case lists:member(IndexNode, dotted_db_utils:peers(State#state.index)) of
-        true   ->
-            F = fun({Idx,_},_) -> Idx =/= Index end,
-            Replicated0 = swc_vv:filter(F, State#state.replicated),
-            Replicated1 = swc_vv:add(Replicated0, {VnodeID,MyRemoteCounter}),
-            {ok, State#state{replicated=Replicated1}};
+        true  ->
+            NodeClock = swc_node:add(State#state.clock, {PeerId, 0}),
+            MyPeersIds = ordsets:add_element(PeerId, State#state.peers_ids),
+            WM = case ordsets:size(MyPeersIds) == (?REPLICATION_FACTOR-1)*2 of
+                true -> % we have all the peers Ids, now broadcast that list to our peers
+                    % lager:info("Peers Ids DONE!"),
+                    CurrentPeers = dotted_db_utils:peers(State#state.index),
+                    broadcast_my_peers_to_my_peers(CurrentPeers, State#state.id, MyPeersIds),
+                    swc_watermark:add_peer(State#state.watermark, State#state.id, MyPeersIds);
+                false ->
+                    % lager:info("Getting Peers Ids ~p/~p",[ordsets:size(MyPeersIds), (?REPLICATION_FACTOR-1)*2]),
+                    State#state.watermark
+            end,
+            {ok, State#state{clock=NodeClock, watermark=WM, peers_ids=MyPeersIds}};
         false ->
             lager:info("WRONG NODE ID! IxNd: ~p ", [IndexNode]),
             {ok, State}
@@ -425,6 +478,7 @@ handle_info(report_tick, State=#state{stats=true}) ->
 %% Buffer Strip Tick
 handle_info(strip_keys, State=#state{mode=recovering}) ->
     % schedule the strip for keys that still have causal context at the moment
+    lager:warning("Not stripping keys because we are in recovery mode."),
     schedule_strip_keys(State#state.buffer_strip_interval),
     {ok, State};
 handle_info(strip_keys, State=#state{mode=normal, non_stripped_keys=NSKeys}) ->
@@ -503,7 +557,7 @@ handoff_starting(TargetNode, State) ->
         true -> ok;
         false ->
             Key = {?DEFAULT_BUCKET, {?VNODE_STATE_KEY, State#state.index}},
-            NodeState = {State#state.clock, State#state.keylog, State#state.replicated, State#state.non_stripped_keys},
+            NodeState = {State#state.clock, State#state.dotkeymap, State#state.watermark, State#state.non_stripped_keys},
             dotted_db_storage:put(State#state.storage, Key, NodeState)
     end,
     {true, State}.
@@ -519,9 +573,9 @@ handle_handoff_data(Data, State) ->
     % decode the data received
     NewState =
         case dotted_db_utils:decode_kv(Data) of
-            {NodeKey, {NodeClock, KeyLog, Replicated, NSK}} ->
+            {NodeKey, {NodeClock, DotKeyMap, Watermark, NSK}} ->
                 NodeClock2 = swc_node:join(NodeClock, State#state.clock),
-                State#state{clock = NodeClock2, keylog = KeyLog, replicated = Replicated, non_stripped_keys = NSK};
+                State#state{clock = NodeClock2, dotkeymap = DotKeyMap, watermark = Watermark, non_stripped_keys = NSK};
             {Key, Obj} ->
                 {noreply, State2} = handle_command({replicate, {dummy_req_id, Key, Obj, ?DEFAULT_NO_REPLY}}, undefined, State),
                 State2
@@ -551,8 +605,8 @@ delete(State) ->
         end,
     case State#state.clock =/= [] andalso Good of
         true  -> 
-            lager:info("IxNd:~p // Clock:~p // KL:~p // SWc_VV:~p",
-                [{State#state.index, node()}, State#state.clock, State#state.keylog, State#state.replicated] ),
+            lager:info("IxNd:~p // Clock:~p // DKM:~p // Watermark:~p",
+                [{State#state.index, node()}, State#state.clock, State#state.dotkeymap, State#state.watermark] ),
             lager:info("GOOD_DROP: {~p, ~p}",[State#state.index, node()]);
         false -> ok
     end,
@@ -629,21 +683,22 @@ handle_write({write, {ReqID, Operation, Key, Value, Context, FSMTime}}, State) -
     NewObject = dotted_db_object:set_fsm_time(FSMTime, NewObject0),
     % save the new k\v and remove unnecessary causal information
     _= strip_save_batch([{Key, NewObject}], State#state{clock=NodeClock}, Now),
-    % append the key to the tail of the key log
-    {Base, Keys} = State#state.keylog,
-    KeyLog = {Base, Keys ++ [Key]},
+    % append the key to the tail of the KDM
+    DotKeyMap = swc_dotkeymap:add_key(State#state.dotkeymap, State#state.id, Key, Dot),
     % Optionally collect stats
     case State#state.stats of
         true -> ok;
         false -> ok
     end,
     % return the updated node state
-    {reply, {ok, ReqID, NewObject}, State#state{clock = NodeClock, keylog = KeyLog}}.
+    {reply, {ok, ReqID, NewObject}, State#state{clock = NodeClock, dotkeymap = DotKeyMap}}.
 
 
 handle_replicate({replicate, {ReqID, Key, NewObject, NoReply}}, State) ->
     Now = undefined,% os:timestamp(),
     NodeClock = dotted_db_object:add_to_node_clock(State#state.clock, NewObject),
+    % append the key to the KDM
+    DotKeyMap = swc_dotkeymap:add_objects(State#state.dotkeymap, [{Key, dotted_db_object:get_container(NewObject)}]),
     % get and fill the causal history of the local key
     DiskObject = guaranteed_get(Key, State),
     % synchronize both objects
@@ -655,7 +710,7 @@ handle_replicate({replicate, {ReqID, Key, NewObject, NoReply}}, State) ->
             State#state.non_stripped_keys;
         false ->
             % save the new object, while stripping the unnecessary causality
-            case strip_save_batch([{Key, FinalObject}], State#state{clock=NodeClock}, Now) of
+            case strip_save_batch([{Key, FinalObject}], State#state{clock=NodeClock, dotkeymap=DotKeyMap}, Now) of
                 [] -> State#state.non_stripped_keys;
                 _  -> add_key_to_NSK(Key, NewObject, State#state.non_stripped_keys)
             end
@@ -665,7 +720,7 @@ handle_replicate({replicate, {ReqID, Key, NewObject, NoReply}}, State) ->
         true -> ok;
         false -> ok
     end,
-    NewState = State#state{clock = NodeClock, non_stripped_keys = NSK},
+    NewState = State#state{clock = NodeClock, dotkeymap = DotKeyMap, non_stripped_keys = NSK},
     % return the updated node state
     case NoReply of
         true  -> {noreply, NewState};
@@ -683,33 +738,32 @@ handle_sync_start({sync_start, ReqID}, State=#state{mode=recovering}) ->
     {reply, {cancel, ReqID, recovering}, State};
 handle_sync_start({sync_start, ReqID}, State=#state{mode=normal}) ->
     % choose a peer at random
-    NodeB = {IndexB, _} = dotted_db_utils:random_from_list(dotted_db_utils:peers(State#state.index)),
-    % get the NodeB entry from this node clock
-    PeersIDs = swc_vv:ids(State#state.replicated),
-    VnodeB = proplists:lookup(IndexB, PeersIDs),
-    EntryB = swc_node:get(VnodeB, State#state.clock),
+    NodeB = dotted_db_utils:random_from_list(dotted_db_utils:peers(State#state.index)),
+    % get my peers
+    PeersIDs = swc_watermark:peers(State#state.watermark),
     % send a sync message to that node
-    {reply, {ok, ReqID, State#state.id, NodeB, EntryB}, State}.
+    {reply, {ok, ReqID, State#state.id, NodeB, State#state.clock, PeersIDs}, State}.
 
 
-handle_sync_missing({sync_missing, ReqID, _, _}, State=#state{mode=recovering}) ->
+handle_sync_missing({sync_missing, ReqID, _, _, _}, State=#state{mode=recovering}) ->
     {reply, {cancel, ReqID, recovering}, State};
-handle_sync_missing({sync_missing, ReqID, RemoteID={_,_}, LocalEntryInRemoteClock}, State=#state{mode=normal}) ->
-    {RemoteIndex,_} = RemoteID,
-    % % get the all the dots (only the counters) from the local node clock, with id equal to the local node
-    % LocalDots = swc_node:values(swc_node:get(State#state.id, State#state.clock)),
-    % % get the all the dots (only the counters) from the asking node clock, with id equal to the local node
-    % RemoteDots =  swc_node:values(LocalEntryInRemoteClock),
+handle_sync_missing({sync_missing, ReqID, _RemoteID={RemoteIndex,_}, RemoteClock, RemotePeers}, State=#state{mode=normal}) ->
     % calculate what dots are present locally that the asking node does not have
-    MissingDots = swc_node:subtract_dots(swc_node:get(State#state.id, State#state.clock), LocalEntryInRemoteClock),
-    % MissingDots = lists:usort(LocalDots -- RemoteDots),
-    {KBase, KeyList} = State#state.keylog,
+    MissingDots = swc_node:missing_dots(State#state.clock, RemoteClock, RemotePeers),
     % get the keys corresponding to the missing dots,
-    MissingKeys = [lists:nth(MDot-KBase, KeyList) || MDot <- MissingDots, MDot > KBase],
+    {MissingKeys0, _DotsNotFound} = swc_dotkeymap:get_keys(State#state.dotkeymap, MissingDots),
+    % remove duplicate keys
+    MissingKeys = sets:to_list(sets:from_list(MissingKeys0)),
     % filter the keys that the asking node does not replicate
     RelevantMissingKeys = filter_irrelevant_keys(MissingKeys, RemoteIndex),
     % get each key's respective Object and strip any unnecessary causal information to save network
     StrippedObjects = guaranteed_get_strip_list(RelevantMissingKeys, State),
+    % DotsNotFound2 = [ {A,B} || {A,B} <- DotsNotFound, B =/= [] andalso A =:= State#state.id],
+    % case DotsNotFound2 of
+    %     [] -> ok;
+    %     _  -> lager:info("\n\n~p to ~p:\n\tNotFound: ~p \n\tMiKeys: ~p \n\tRelKey: ~p \n\tKDM: ~p \n\tStrip: ~p \n\tBVV: ~p \n",
+    %             [State#state.id, RemoteID, DotsNotFound2, MissingKeys, RelevantMissingKeys, State#state.dotkeymap, StrippedObjects, State#state.clock])
+    % end,
     % Optionally collect stats
     case State#state.stats andalso MissingKeys > 0 of
         true ->
@@ -725,7 +779,7 @@ handle_sync_missing({sync_missing, ReqID, RemoteID={_,_}, LocalEntryInRemoteCloc
 
                     Size_Meta_Sent = byte_size(term_to_binary(Ctx_Sent_Strip)),
                     dotted_db_stats:notify({histogram, sync_context_size}, Size_Meta_Sent),
-                    dotted_db_stats:notify({histogram, sync_metadata_size}, byte_size(term_to_binary(LocalEntryInRemoteClock))),
+                    dotted_db_stats:notify({histogram, sync_metadata_size}, byte_size(term_to_binary(RemoteClock))),
 
                     Payload_Sent_Strip = [{Key, dotted_db_object:get_values(Obj)} || {Key, Obj} <- StrippedObjects],
                     Size_Payload_Sent = byte_size(term_to_binary(Payload_Sent_Strip)),
@@ -740,38 +794,48 @@ handle_sync_missing({sync_missing, ReqID, RemoteID={_,_}, LocalEntryInRemoteCloc
     {reply, {   ok,
                 ReqID,
                 State#state.id,
-                swc_node:base(State#state.clock),
-                swc_node:get(RemoteID, State#state.clock), % Remote entry in this node's global clock
+                State#state.clock,
+                State#state.watermark,
+                swc_watermark:peers(State#state.watermark),
                 StrippedObjects},
         State}.
 
-handle_sync_repair({sync_repair, {ReqID, _, _, _, NoReply}}, State=#state{mode=recovering}) ->
+handle_sync_repair({sync_repair, {ReqID, _, _, _, _, NoReply}}, State=#state{mode=recovering}) ->
+    lager:warning("repairing stuff"),
     case NoReply of
         true  -> {noreply, State};
         false -> {reply, {cancel, ReqID, recovering}, State}
     end;
-handle_sync_repair({sync_repair, {ReqID, RemoteNodeID={_,_}, RemoteClockBase, MissingObjects, NoReply}}, State=#state{mode=normal}) ->
+handle_sync_repair({sync_repair, {ReqID, _RemoteNodeID={RemoteIndex,_}, RemoteClock, RemoteWatermark, MissingObjects, NoReply}},
+                   State=#state{mode=normal, index=MyIndex, clock=LocalClock, dotkeymap=DotKeyMap, watermark=Watermark1}) ->
     Now = os:timestamp(),
-    NodeClock = sync_merge_clocks(RemoteNodeID, RemoteClockBase, State),
-    % get the local objects corresponding to the received objects and fill the
-    % causal history for all of them
+    % add information about the remote clock to our clock, but only for the remote node entry
+    LocalClock2 = sync_clocks(LocalClock, RemoteClock, RemoteIndex),
+    % get the local objects corresponding to the received objects and fill the causal history for all of them
     FilledObjects =
-        [{ Key, dotted_db_object:fill(Key, RemoteClockBase, Obj), guaranteed_get(Key, State) }
+        [{ Key, dotted_db_object:fill(Key, RemoteClock, Obj), guaranteed_get(Key, State) }
          || {Key,Obj} <- MissingObjects],
     % synchronize / merge the remote and local objects
     SyncedObjects = [{ Key, dotted_db_object:sync(Remote, Local), Local } || {Key, Remote, Local} <- FilledObjects],
     % filter the objects that are not missing after all
-    RealMissingObjects = [{ Key, Synced } || {Key, Synced, Local} <- SyncedObjects, (not dotted_db_object:equal_values(Synced,Local)) orelse
-                                        (dotted_db_object:get_values(Synced)==[] andalso dotted_db_object:get_values(Local)==[])],
+    RealMissingObjects = [{ Key, Synced } || {Key, Synced, Local} <- SyncedObjects,
+                                             (not dotted_db_object:equal_values(Synced,Local)) orelse
+                                             (dotted_db_object:get_values(Synced)==[] andalso
+                                              dotted_db_object:get_values(Local)==[])],
+    % add each new dot to our node clock
+    NodeClock = lists:foldl(fun ({_K,O}, Acc) -> dotted_db_object:add_to_node_clock(Acc, O) end, LocalClock2, RealMissingObjects),
+    % add new keys to the Dot-Key Mapping
+    DKM = swc_dotkeymap:add_objects(DotKeyMap,
+            lists:map(fun ({Key,Obj}) -> {Key, dotted_db_object:get_container(Obj)} end, RealMissingObjects)),
     % save the synced objects and strip their causal history
     NonStrippedObjects = strip_save_batch(RealMissingObjects, State#state{clock=NodeClock}, Now),
     % schedule a later strip attempt for non-stripped synced keys
     NSK = add_keys_to_NSK(NonStrippedObjects, State#state.non_stripped_keys),
-    % update the replicated clock to reflect what the asking node has about the local node
-    {Base,_} = swc_node:get(State#state.id, RemoteClockBase),
-    Replicated = swc_vv:add(State#state.replicated, {RemoteNodeID, Base}),
-    % Garbage Collect keys from the KeyLog and delete keys with no causal context
-    State2 = gc_keylog(State#state{clock=NodeClock, non_stripped_keys=NSK, replicated=Replicated}),
+    % update my watermark
+    Watermark3 = update_watermark_after_sync(Watermark1, RemoteWatermark, MyIndex, RemoteIndex, NodeClock, RemoteClock),
+    % Garbage Collect keys from the dotkeymap and delete keys with no causal context
+    update_jump_clock(RemoteIndex),
+    State2 = gc_dotkeymap(State#state{clock=NodeClock, dotkeymap=DKM, non_stripped_keys=NSK, watermark=Watermark3}),
     % Optionally collect stats
     case State2#state.stats of
         true ->
@@ -786,7 +850,7 @@ handle_sync_repair({sync_repair, {ReqID, RemoteNodeID={_,_}, RemoteClockBase, Mi
                 false ->
                     dotted_db_stats:notify({histogram, sync_hit_ratio}, 100)
             end,
-            dotted_db_stats:notify({histogram, sync_metadata_size}, byte_size(term_to_binary(RemoteClockBase))),
+            dotted_db_stats:notify({histogram, sync_metadata_size}, byte_size(term_to_binary(RemoteClock))),
             ok;
         false ->
             ok
@@ -807,26 +871,36 @@ handle_sync_repair({sync_repair, {ReqID, RemoteNodeID={_,_}, RemoteClockBase, Mi
 handle_restart({restart, ReqID}, State=#state{mode=recovering}) ->
     {reply, {cancel, ReqID, recovering}, State};
 handle_restart({restart, ReqID}, State=#state{mode=normal}) ->
-    ThisVnode = {State#state.index, node()},
     OldVnodeID = State#state.id,
-    {MyBase,0} = swc_node:get(OldVnodeID, State#state.clock),
     NewVnodeID = new_vnode_id(State#state.index),
-    NewReplicated = swc_vv:reset_with_same_ids(State#state.replicated),
+    % keep track from now on on which peers this node did a sync, to be able to
+    % jump the old vnode id in the node clock when we synced with every other peer
+    add_removed_vnode_jump_clock(OldVnodeID),
+    % changes all occurences of the old id for the new id,
+    % while at the same time resetting the column and the line of the new id,
+    % which means that this node does not know about anything at the moment,
+    % nor other vnodes know about this new id updates (since there are none at the moment).
+    NewWatermark0 = swc_watermark:retire_peer(State#state.watermark, OldVnodeID, NewVnodeID),
+    % reset the entire watermark
+    NewWatermark = swc_watermark:reset_counters(NewWatermark0),
     CurrentPeers = dotted_db_utils:peers(State#state.index),
+    lager:info("RESTART:\nOLD: ~p\nNEW: ~p\nPEERS: ~p",[OldVnodeID, NewVnodeID, CurrentPeers]),
     true = delete_ets_all_keys(State),
     NewAtomID = create_ets_all_keys(NewVnodeID),
     {ok, Storage1} = dotted_db_storage:drop(State#state.storage),
     ok = dotted_db_storage:close(Storage1),
     % open the storage backend for the key-values of this vnode
     {_, NewStorage} = open_storage(State#state.index),
-    ok = save_vnode_state(State#state.dets, {NewVnodeID, swc_node:new(), {0,[]}, NewReplicated, []}),
-    {reply, {ok, ReqID, {ReqID, ThisVnode, OldVnodeID, NewVnodeID, MyBase}, CurrentPeers},
+    ok = save_vnode_state(State#state.dets, {NewVnodeID, swc_node:new(), swc_dotkeymap:new(), NewWatermark, []}),
+    % store the number of full-syncs
+    put(nr_full_syncs, 0),
+    {reply, {ok, ReqID, {ReqID, State#state.index, OldVnodeID, NewVnodeID}, CurrentPeers},
         State#state{
             id                  = NewVnodeID,
             atom_id             = NewAtomID,
             clock               = swc_node:new(),
-            keylog              = {0,[]},
-            replicated          = NewReplicated,
+            dotkeymap           = swc_dotkeymap:new(),
+            watermark           = NewWatermark,
             non_stripped_keys   = {[],[]},
             recover_keys        = [],
             storage             = NewStorage,
@@ -835,16 +909,19 @@ handle_restart({restart, ReqID}, State=#state{mode=normal}) ->
             mode                = recovering}}.
 
 %% On the good nodes
-handle_inform_peers_restart({inform_peers_restart, {ReqID, {RestartingVnodeIndex,_}, OldVnodeID, NewVnodeID, RemoteBase}}, State) ->
-    % jump the base counter of the old id in the node clock, to make sure we "win"
-    % against all keys potentially not stripped yet because of that old id
-    NodeClock0 = swc_node:store_entry(OldVnodeID, {RemoteBase+100000,0}, State#state.clock),
+handle_inform_peers_restart({inform_peers_restart, {ReqID, RestartingVnodeIndex, OldVnodeID, NewVnodeID}}, State) ->
+    % keep track from now on on which peers this node did a sync, to be able to
+    % jump the old vnode id in the node clock when we synced with every other peer
+    add_removed_vnode_jump_clock(OldVnodeID),
+    % replace the old peer entry in the watermarks of this vnode's peers also
+    CurrentPeers = dotted_db_utils:peers(State#state.index),
+    replace_peer(CurrentPeers, OldVnodeID, NewVnodeID),
+    % update the "mypeers" set
+    MyPeersIds = ordsets:add_element(NewVnodeID, ordsets:del_element(OldVnodeID, State#state.peers_ids)),
     % add the new node id to the node clock
-    NewClock = swc_node:add(NodeClock0, {NewVnodeID, 0}),
-    % remove the old node id from the replicated
-    NewReplicated0 = swc_vv:delete_key(State#state.replicated, OldVnodeID),
-    % remove the new node id to the replicated
-    NewReplicated = swc_vv:add(NewReplicated0, {NewVnodeID, 0}),
+    NewClock = swc_node:add(State#state.clock, {NewVnodeID, 0}),
+    % replace the old entry for the new entry in the watermark
+    NewWatermark = swc_watermark:retire_peer(State#state.watermark, OldVnodeID, NewVnodeID),
     % add the new node id to the node clock
     {AllKeys,_} = ets_get_all_keys(State),
     % filter irrelevant keys from the perspective of the restarting vnode
@@ -861,39 +938,50 @@ handle_inform_peers_restart({inform_peers_restart, {ReqID, {RestartingVnodeIndex
     {reply, { ok, stage1, ReqID, {
                 ReqID,
                 {State#state.index, node()},
-                State#state.id,
-                NewClock, %swc_node:base(NewClock),
+                OldVnodeID,
+                NewClock,
                 StrippedObjects,
+                NewWatermark,
                 LastBatch % is this the last batch?
-            }}, State#state{clock=NewClock, replicated=NewReplicated, recover_keys=RecoverKeys}}.
+            }}, State#state{clock=NewClock, peers_ids=MyPeersIds, watermark=NewWatermark, recover_keys=RecoverKeys}}.
 
 %% On the restarting node
-handle_recover_keys({recover_keys, {ReqID, RemoteVnode, _RemoteVnodeId={_,_}, RemoteClock, Objects, _LastBatch=false}}, State) ->
+handle_recover_keys({recover_keys, {ReqID, RemoteVnode, _OldVnodeID={_,_}, RemoteClock, Objects, _RemoteWatermark, _LastBatch=false}}, State) ->
     % save the objects and return the ones that were not totally filtered
-    NonStrippedObjects = fill_strip_save_kvs(Objects, RemoteClock, State#state.clock, State, os:timestamp()),
+    {NodeClock, DKM, NonStrippedObjects} = fill_strip_save_kvs(Objects, RemoteClock, State#state.clock, State, os:timestamp()),
+    % % add new keys to the Dot-Key Mapping
+    % DKM = swc_dotkeymap:add_objects(State#state.dotkeymap,
+    %         lists:map(fun ({Key,Obj}) -> {Key, dotted_db_object:get_container(Obj)} end, Objects)),
     % schedule a later strip attempt for non-stripped synced keys
     NSK = add_keys_to_NSK(NonStrippedObjects, State#state.non_stripped_keys),
-    {reply, {ok, stage2, ReqID, RemoteVnode}, State#state{non_stripped_keys=NSK}};
+    {reply, {ok, stage2, ReqID, RemoteVnode}, State#state{clock=NodeClock, dotkeymap=DKM, non_stripped_keys=NSK}};
 %% On the restarting node
-handle_recover_keys({recover_keys, {ReqID, RemoteVnode, RemoteNodeID={_,_}, RemoteClock, Objects, _LastBatch=true}}, State) ->
-    % merge the remote clock with our own clock
-    NodeClock0 = swc_node:merge(State#state.clock, RemoteClock),
-    % filter ids from non-peer nodes
-    PeerIndices = [State#state.index]++[Idx || {Idx,_} <- dotted_db_utils:peers(State#state.index)],
-    NodeClock = orddict:filter(fun({Index,_}, _) -> lists:member(Index, PeerIndices) end, NodeClock0),
-    % update the replicated clock to reflect what the asking node has about the local node
-    {Base,_} = swc_node:get(State#state.id, RemoteClock),
-    Replicated = swc_vv:add(State#state.replicated, {RemoteNodeID, Base}),
+handle_recover_keys({recover_keys, {ReqID, RemoteVnode={RemoteIndex,_}, _OldID, RemoteClock, Objects, RemoteWatermark, _LastBatch=true}}, State) ->
+    NodeClock0 = sync_clocks(State#state.clock, RemoteClock, RemoteIndex),
     % save the objects and return the ones that were not totally filtered
-    NonStrippedObjects = fill_strip_save_kvs(Objects, RemoteClock, State#state.clock, State#state{clock=NodeClock}, os:timestamp()),
+    {NodeClock, DKM, NonStrippedObjects} = fill_strip_save_kvs(Objects, RemoteClock, State#state.clock, State#state{clock=NodeClock0}, os:timestamp()),
     % schedule a later strip attempt for non-stripped synced keys
     NSK = add_keys_to_NSK(NonStrippedObjects, State#state.non_stripped_keys),
-    % Garbage Collect keys from the KeyLog and delete keys with no causal context
-    State2 = gc_keylog(State#state{clock=NodeClock, non_stripped_keys=NSK, replicated=Replicated}),
-    {reply, {ok, stage4, ReqID, RemoteVnode}, State2#state{mode=normal}}.
+    % update my watermark
+    Watermark = update_watermark_after_sync(State#state.watermark, RemoteWatermark, State#state.index, RemoteIndex, NodeClock, RemoteClock),
+    {Mode, NodeClock3} = case get(nr_full_syncs) of
+        undefined ->
+            {normal, NodeClock};
+        N when N >= (?REPLICATION_FACTOR-1)*2-1 ->
+            erase(nr_full_syncs),
+            % jump the base counter of all old ids in the node clock, to make sure we "win"
+            % against all keys potentially not stripped yet because of that old id
+            NodeClock2 = jump_node_clock_by_index(NodeClock, State#state.id, State#state.index, 20000),
+            % NodeClock2 = swc_node:store_entry(OldVnodeID, {Base+10000,0}, NodeClock),
+            {normal, NodeClock2};
+        N when N < (?REPLICATION_FACTOR-1)*2-1 ->
+            put(nr_full_syncs, N+1),
+            {recovering, NodeClock}
+    end,
+    {reply, {ok, stage4, ReqID, RemoteVnode}, State#state{clock=NodeClock3, dotkeymap=DKM, non_stripped_keys=NSK, watermark=Watermark, mode=Mode}}.
 
 %% On the good nodes
-handle_inform_peers_restart2({inform_peers_restart2, {ReqID, NewVnodeID}}, State) ->
+handle_inform_peers_restart2({inform_peers_restart2, {ReqID, NewVnodeID, OldVnodeID}}, State) ->
     {LastBatch1, Objects, RecoverKeys1} =
         case proplists:get_value(NewVnodeID, State#state.recover_keys) of
             undefined ->
@@ -913,9 +1001,10 @@ handle_inform_peers_restart2({inform_peers_restart2, {ReqID, NewVnodeID}}, State
     {reply, { ok, stage3, ReqID, {
                 ReqID,
                 {State#state.index, node()},
-                State#state.id,
-                State#state.clock, %swc_node:base(State#state.clock),
+                OldVnodeID,
+                State#state.clock,
                 Objects,
+                State#state.watermark,
                 LastBatch1 % is this the last batch?
             }}, State#state{recover_keys=RecoverKeys1}}.
 
@@ -1000,15 +1089,15 @@ read_vnode_state(Index) ->
             {Dets, State}
     end.
 
-% @doc Initializes the "replicated" version vector to 0 for peers of this vnode.
-initialize_replicated(NodeId={Index,_}) ->
-    lager:info("Starting init repli @ IndexNode: ~p",[{Index,node()}]),
+% @doc Initializes the "watermark" matrix with 0's for peers of this vnode.
+initialize_watermark(_NodeId={Index,_}) ->
+    lager:debug("Initialize watermark @ IndexNode: ~p",[{Index,node()}]),
     % get the Index and Node of this node's peers, i.e., all nodes that replicates any subset of local keys.
     IndexNodes = [ IndexNode || IndexNode <- dotted_db_utils:peers(Index)],
     % for replication factor N = 3, the numbers of peers should be 4 (2 vnodes before and 2 after).
     (?REPLICATION_FACTOR-1)*2 = length(IndexNodes),
     % ask each vnode for their current vnode ID
-    get_vnode_id(IndexNodes, NodeId),
+    get_vnode_id(IndexNodes),
     ok.
 
 % @doc Initializes the "sync" stats for peers of this vnode.
@@ -1037,7 +1126,7 @@ open_storage(Index) ->
                 {io_mode, application:get_env(dotted_db, bitcask_io_mode, erlang)},
                 {merge_window, application:get_env(dotted_db, bitcask_merge_window, never)}]}]}
     end,
-    lager:info("Using ~p for vnode ~p.",[Backend,Index]),
+    lager:debug("Using ~p for vnode ~p.",[Backend,Index]),
     % give the name to the backend for this vnode using its position in the ring.
     DBName = filename:join("data/objects/", integer_to_list(Index)),
     {ok, Storage} = dotted_db_storage:open(DBName, Backend, Options),
@@ -1048,8 +1137,8 @@ close_all(undefined) -> ok;
 close_all(State=#state{ id          = Id,
                         storage     = Storage,
                         clock       = NodeClock,
-                        replicated  = Replicated,
-                        keylog      = KeyLog,
+                        watermark   = Watermark,
+                        dotkeymap   = DotKeyMap,
                         non_stripped_keys = NSK,
                         dets        = Dets } ) ->
     case dotted_db_storage:close(Storage) of
@@ -1057,45 +1146,33 @@ close_all(State=#state{ id          = Id,
         {error, Reason} ->
             lager:warning("Error on closing storage: ~p",[Reason])
     end,
-    ok = save_vnode_state(Dets, {Id, NodeClock, KeyLog, Replicated, NSK}),
+    ok = save_vnode_state(Dets, {Id, NodeClock, DotKeyMap, Watermark, NSK}),
     true = delete_ets_all_keys(State),
     ok = dets:close(Dets).
 
 
-gc_keylog(State) ->
-    {KBase, KeyList} = State#state.keylog,
-    case is_replicated_vv_up_to_date(State) of
+gc_dotkeymap(State=#state{dotkeymap = DotKeyMap, watermark = Watermark, non_stripped_keys = NSK}) ->
+    case is_watermark_up_to_date(Watermark) of
         true ->
-            case KeyList =/= [] of
-                true ->
-                    % get the oldest dot generated at this node that is also known by all peers of this node (relevant nodes)
-                    MinimumDot = swc_vv:min(State#state.replicated),
-                    lager:debug("Base:~p MinD: ~p ~nRepli: ~p ~nKL: ~p",[KBase, MinimumDot, State#state.replicated, KeyList]),
-                    % remove the keys from the keylog that have a dot (corresponding to their position) smaller than the
-                    % minimum dot, i.e., this update is known by all nodes that replicate it and therefore can be removed
-                    % from the keylog; for simplicity, remove only keys that start at the head, to actually shrink the log
-                    % and increment the base counter.
-                    {RemovedKeys, KeyLog} =
-                        case MinimumDot > KBase of
-                            false -> % we don't need to remove any keys from the log
-                                {[], {KBase, KeyList}};
-                            true  -> % we can remove keys and shrink the keylog
-                                {RemKeys, CurrentKeys} = lists:split(MinimumDot - KBase, KeyList),
-                                {RemKeys, {MinimumDot, CurrentKeys}}
-                        end,
-                    % add the non stripped keys to the node state for later strip attempt
-                    NSK = add_keys_from_keylog_to_NSK(RemovedKeys, State#state.id, KBase, State#state.non_stripped_keys),
-                    % Optionally collect stats
-                    case State#state.stats of
-                        true -> ok;
-                        false -> ok
-                    end,
-                    State#state{keylog=KeyLog, non_stripped_keys=NSK};
-                false ->
-                    State
-            end;
+            % remove the keys from the dotkeymap that have a dot (corresponding to their position) smaller than the
+            % minimum dot, i.e., this update is known by all nodes that replicate it and therefore can be removed
+            % from the dotkeymap;
+            {DotKeyMap2, RemovedKeys} = swc_dotkeymap:prune(DotKeyMap, Watermark),
+            % remove entries in watermark from retired peers, that aren't needed anymore
+            % (i.e. there isn't keys coordinated by those retired nodes in the DotKeyMap)
+            OldPeersStillNotSynced = get_old_peers_still_not_synced(),
+            Watermark2 = swc_watermark:prune_retired_peers(Watermark, DotKeyMap2, OldPeersStillNotSynced),
+            % add the non stripped keys to the node state for later strip attempt
+            NSK2 = add_keys_from_dotkeymap_to_NSK(RemovedKeys, NSK),
+            State#state{dotkeymap = DotKeyMap2, non_stripped_keys=NSK2, watermark=Watermark2};
         false ->
-            State#state.keylog =/= {0,[]} andalso initialize_replicated(State#state.id),
+            {WM,_} = State#state.watermark,
+            lager:info("Watermark not up to date: ~p entries, mode: ~p",[orddict:size(WM), State#state.mode]),
+            [case orddict:size(V) =:= (?REPLICATION_FACTOR*2)-1 of
+                 true -> lager:info("\t ~p for ~p \n", [orddict:size(V), K]);
+                 false -> lager:info("\t ~p for ~p \n\t\t ~p\n", [orddict:size(V), K, V])
+             end || {K,V} <- WM],
+            swc_dotkeymap:empty(DotKeyMap) andalso initialize_watermark(State#state.id),
             State
     end.
 
@@ -1114,8 +1191,8 @@ schedule_report(Interval) ->
 -spec report(state()) -> {any(), state()}.
 report(State=#state{    id                  = Id,
                         clock               = NodeClock,
-                        replicated          = Replicated,
-                        keylog              = KeyLog,
+                        watermark           = Watermark,
+                        dotkeymap           = DotKeyMap,
                         non_stripped_keys   = NSK,
                         dets                = Dets,
                         updates_mem         = UpMem } ) ->
@@ -1126,7 +1203,7 @@ report(State=#state{    id                  = Id,
             UpMem + 1;
         false ->
             % it's time to persist vnode state
-            save_vnode_state(Dets, {Id, NodeClock, KeyLog, Replicated, NSK}),
+            save_vnode_state(Dets, {Id, NodeClock, DotKeyMap, Watermark, NSK}),
             % restart the counter
             0
     end,
@@ -1134,11 +1211,12 @@ report(State=#state{    id                  = Id,
 
 
 report_stats(State=#state{stats=true}) ->
-    case State#state.keylog =/= {0,[]} andalso State#state.clock =/= swc_node:new() andalso State#state.replicated =/= [] of
+    case (not swc_dotkeymap:empty(State#state.dotkeymap)) andalso
+         State#state.clock =/= swc_node:new() andalso
+         State#state.watermark =/= swc_watermark:new() of
         true ->
-            {_B1,K1} = State#state.keylog,
-            dotted_db_stats:notify({histogram, kl_len}, length(K1)),
-            dotted_db_stats:notify({histogram, kl_size}, size(term_to_binary(State#state.keylog))),
+            dotted_db_stats:notify({histogram, kl_len}, swc_dotkeymap:size(State#state.dotkeymap)),
+            dotted_db_stats:notify({histogram, kl_size}, size(term_to_binary(State#state.dotkeymap))),
 
             MissingDots = [ miss_dots(Entry) || {_,Entry} <- State#state.clock ],
             dotted_db_stats:notify({histogram, bvv_missing_dots}, average(MissingDots)),
@@ -1267,8 +1345,8 @@ split_deletes([{Key, Ctx} | Deletes], State, {Stripped, NotStripped}) ->
 
 -spec strip_context(vv(), bvv()) -> vv().
 strip_context(Context, NodeClock) ->
-    FunFilter = 
-        fun (Id, Counter) -> 
+    FunFilter =
+        fun (Id, Counter) ->
             {Base,_Dots} = swc_node:get(Id, NodeClock),
             Counter > Base
         end,
@@ -1351,7 +1429,11 @@ dictNSK(Dot, {Key, Ctx}, {Del, Batch}, State, Now) ->
                 Obj ->
                     dictNSK2(Dot, {Key, Obj}, {Del,Batch}, State, Now, true)
             end;
-        _ -> 
+        _V ->
+            % case random:uniform() < 0.05 of
+            %     true  -> lager:info("STRIPPPPPPPPPPPPP:\nClock:~p\nCtx: ~p\n", [State#state.clock, V]);
+            %     false -> ok
+            % end,
             {Del, Batch} %% not stripped yet; keep in the dict
     end.
 
@@ -1433,10 +1515,16 @@ add_writes_to_NSK([Head={_,_,_} | Tail], {Del,Wrt}) ->
     add_writes_to_NSK(Tail, {Del,Wrt2}).
 
 
-add_keys_from_keylog_to_NSK([], _, _, NSK) -> NSK;
-add_keys_from_keylog_to_NSK([Key={_,_}|Tail], NodeID={_,_}, Base, {Del,Wrt}) ->
-    Wrt2 = add_one_write_to_NSK({Key, {NodeID, Base+1}, undefined}, Wrt),
-    add_keys_from_keylog_to_NSK(Tail, NodeID, Base+1, {Del,Wrt2}).
+add_keys_from_dotkeymap_to_NSK([], NSK) -> NSK;
+add_keys_from_dotkeymap_to_NSK([{NodeId, DotKeys}|Tail], {Del,Wrt}) ->
+    Wrt2 = lists:foldl(
+             fun({Dot,Key}, Acc) ->
+                     add_one_write_to_NSK({Key, {NodeId, Dot}, undefined}, Acc)
+             end,
+             Wrt,
+             DotKeys),
+    % Wrt2 = add_one_write_to_NSK({Key, {NodeID, Base+1}, undefined}, Wrt),
+    add_keys_from_dotkeymap_to_NSK(Tail, {Del,Wrt2}).
 
 
 add_one_write_to_NSK({Key, {NodeID,Counter}, Context}, []) ->
@@ -1461,7 +1549,7 @@ fill_strip_save_kvs(Objects, RemoteClock, LocalClock, State, Now) ->
 
 fill_strip_save_kvs([], _, _, State, _Now, {NSK, StrippedObjects}, _ETS) ->
     ok = dotted_db_storage:write_batch(State#state.storage, StrippedObjects),
-    NSK;
+    {State#state.clock, State#state.dotkeymap, NSK};
 fill_strip_save_kvs([{Key={_,_}, Object} | Objects], RemoteClock, LocalClock, State, Now, {NSK, StrippedObjects}, ETS) ->
     % fill the Object with the sending node clock
     FilledObject = dotted_db_object:fill(Key, RemoteClock, Object),
@@ -1470,9 +1558,14 @@ fill_strip_save_kvs([{Key={_,_}, Object} | Objects], RemoteClock, LocalClock, St
     % synchronize both objects
     FinalObject = dotted_db_object:sync(FilledObject, DiskObject),
     % test if the FinalObject has newer information
-    case dotted_db_object:equal(FinalObject, DiskObject) of
-        true -> fill_strip_save_kvs(Objects, RemoteClock, LocalClock, State, Now, {NSK, StrippedObjects}, ETS);
-        false ->
+    case (not dotted_db_object:equal_values(FinalObject, DiskObject)) orelse
+         (dotted_db_object:get_values(FinalObject)==[] andalso dotted_db_object:get_values(DiskObject)==[]) of
+        false -> fill_strip_save_kvs(Objects, RemoteClock, LocalClock, State, Now, {NSK, StrippedObjects}, ETS);
+        true ->
+            % add each new dot to our node clock
+            StateNodeClock = dotted_db_object:add_to_node_clock(State#state.clock, FinalObject),
+            % add new keys to the Dot-Key Mapping
+            DKM = swc_dotkeymap:add_objects(State#state.dotkeymap, [{Key, dotted_db_object:get_container(FinalObject)}]),
             % removed unnecessary causality from the object, based on the current node clock
             StrippedObject = dotted_db_object:strip(State#state.clock, FinalObject),
             {Values, Context} = dotted_db_object:get_container(StrippedObject),
@@ -1512,12 +1605,20 @@ fill_strip_save_kvs([{Key={_,_}, Object} | Objects], RemoteClock, LocalClock, St
             ETS andalso notify_write_latency(dotted_db_object:get_fsm_time(StrippedObject2), Now),
             ETS andalso ets_set_write_time(State#state.atom_id, Key, Now),
             ETS andalso ets_set_fsm_time(State#state.atom_id, Key, dotted_db_object:get_fsm_time(StrippedObject2)),
-            fill_strip_save_kvs(Objects, RemoteClock, LocalClock, State, Now, Acc, ETS)
+            fill_strip_save_kvs(Objects, RemoteClock, LocalClock, State#state{dotkeymap=DKM, clock=StateNodeClock}, Now, Acc, ETS)
     end.
 
 
-is_replicated_vv_up_to_date(State) ->
-    length(State#state.replicated) =:= (?REPLICATION_FACTOR-1)*2.
+is_watermark_up_to_date({WM,_}) ->
+    (orddict:size(WM) =:= (?REPLICATION_FACTOR*2)-1) andalso
+    is_watermark_up_to_date2(WM).
+
+is_watermark_up_to_date2([]) -> true;
+is_watermark_up_to_date2([{_,V}|T]) ->
+    case orddict:size(V) =:= (?REPLICATION_FACTOR*2)-1 of
+        true -> is_watermark_up_to_date2(T);
+        false -> false
+    end.
 
 
 new_vnode_id(Index) ->
@@ -1541,25 +1642,31 @@ delete_ets_all_keys(#state{atom_id=AtomID}) ->
 get_ets_id(Id) ->
     list_to_atom(lists:flatten(io_lib:format("~p", [Id]))).
 
-sync_merge_clocks(RemoteNodeID, RemoteClockBase, State) ->
-    % get current peers node ids from replicated
-    CurrentPeersIds = swc_vv:ids(State#state.replicated),
-    % get peers indices
-    PeerIndices = [Idx || {Idx,_} <- CurrentPeersIds],
-    % filter ids from non-peer nodes
-    FunFilter = fun(Id={Idx,_},_) ->
-                    lists:member(Idx, PeerIndices) andalso %% filter the irrelevant
-                    (not lists:member(Id, CurrentPeersIds)) %% filter the non-dead
-                end,
-    RemoteClockBase2 = orddict:filter(FunFilter, RemoteClockBase),
-    % merge the filtered remote clock with our own clock
-    NodeClock0 = swc_node:merge(State#state.clock, RemoteClockBase2),
+sync_clocks(LocalClock, RemoteClock, RemoteIndex) ->
     % replace the current entry in the node clock for the responding clock with
     % the current knowledge it's receiving
-    RemoteEntry = swc_node:get(RemoteNodeID, RemoteClockBase),
-    swc_node:store_entry(RemoteNodeID, RemoteEntry, NodeClock0).
+    RemoteClock2 = orddict:filter(fun ({Index,_},_) -> Index == RemoteIndex end, RemoteClock),
+    swc_node:merge(LocalClock, RemoteClock2).
 
 
+update_watermark_after_sync(MyWatermark, RemoteWatermark, MyIndex, RemoteIndex, MyClock, RemoteClock) ->
+    % update my watermark with my what I know, based on my node clock
+    MyWatermark2 = orddict:fold(
+            fun (Vnode={Index,_}, _, Acc) ->
+                    case Index == MyIndex of
+                        false -> Acc;
+                        true -> swc_watermark:update_peer(Acc, Vnode, MyClock)
+                    end
+            end, MyWatermark, MyClock),
+    MyWatermark3 = orddict:fold(
+            fun (Vnode={Index,_}, _, Acc) ->
+                    case Index == RemoteIndex of
+                        false -> Acc;
+                        true -> swc_watermark:update_peer(Acc, Vnode, RemoteClock)
+                    end
+            end, MyWatermark2, RemoteClock),
+    % update the watermark to reflect what the asking peer has about its peers
+    swc_watermark:left_join(MyWatermark3, RemoteWatermark).
 
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -1657,4 +1764,52 @@ get_value_dots_for_ets(Object) ->
     {ValueDots, _Context} = dotted_db_object:get_container(Object),
     ValueDots2 = [{D,V} || {D,V} <- ValueDots, V =/= ?DELETE_OP],
     orddict:fetch_keys(ValueDots2).
+
+
+%%% Functions for the small in-memory tracking of which peers this node synces since a some node failure
+
+add_removed_vnode_jump_clock(OldVnodeID) ->
+    Dict =  case get(jump_clock) of
+                undefined -> orddict:new();
+                D -> D
+            end,
+    lager:warning("MEMORY: new retired vnode: ~p\n", [OldVnodeID]),
+    put(jump_clock, orddict:store(OldVnodeID, orddict:new(), Dict)).
+
+update_jump_clock(SyncPeerIndex) ->
+    case get(jump_clock) of
+        undefined -> ok;
+        Dict ->
+            % case random:uniform() < 0.01 of
+            %     true -> lager:warning("for ~p: ~p\n\n", [SyncPeerIndex,Dict]);
+            %     false -> ok
+            % end,
+            D2 = orddict:map(fun (_,PeersCount) -> orddict:update_counter(SyncPeerIndex, 1, PeersCount) end, Dict),
+            D3 = orddict:filter(fun (_,PeersCount) ->
+                                        PeersCount2 = orddict:filter(fun (_,C) -> C > 50 end, PeersCount),
+                                        orddict:size(PeersCount2) < (?REPLICATION_FACTOR-1)*2
+                                end, D2),
+            % D4 = orddict:filter(fun (_,PeersCount) ->
+            %                             PeersCount2 = orddict:filter(fun (_,C) -> C > 50 end, PeersCount),
+            %                             orddict:size(PeersCount2) >= (?REPLICATION_FACTOR-1)*2
+            %                     end, D2),
+            % case orddict:fetch_keys(D4) of
+            %     [] -> ok;
+            %     Rem -> lager:warning("MEMORY: from ~p deleted: ~p\n", [x99problems, Rem])
+            % end,
+            put(jump_clock, D3)
+    end.
+
+get_old_peers_still_not_synced() ->
+    case get(jump_clock) of
+        undefined -> [];
+        Dict -> orddict:fetch_keys(Dict)
+    end.
+
+jump_node_clock_by_index(Clock, CurrentId, Index, Jump) ->
+    OldIds = [Id || Id={Idx,_} <- swc_node:ids(Clock) , Idx == Index andalso Id =/= CurrentId],
+    lists:foldl(fun (OldId, AccClock) ->
+                        {Base,_} = swc_node:get(OldId, AccClock),
+                        swc_node:store_entry(OldId, {Base+Jump,0}, AccClock)
+                end, Clock, OldIds).
 

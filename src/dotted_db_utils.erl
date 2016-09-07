@@ -22,7 +22,14 @@ replica_nodes(Key) ->
             true = ets:insert(?ETS_CACHE_REPLICA_NODES, {Key, IndexNodes}),
             IndexNodes;
         [{_,IndexNodes}] ->
-            IndexNodes
+            case length(IndexNodes) == ?REPLICATION_FACTOR of
+                true  -> IndexNodes;
+                false ->
+                    DocIdx = riak_core_util:chash_key(Key),
+                    IndexNodes = [IndexNode || {IndexNode, _Type} <- riak_core_apl:get_primary_apl(DocIdx, ?REPLICATION_FACTOR, dotted_db)],
+                    true = ets:insert(?ETS_CACHE_REPLICA_NODES, {Key, IndexNodes}),
+                    IndexNodes
+            end
     end.
 
 -spec replica_nodes_indices(bkey()) -> [index()].

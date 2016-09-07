@@ -70,7 +70,7 @@ inform_peers(timeout, State=#state{ req_id      = ReqID,
 inform_peers({cancel, ReqID, recovering}, State=#state{req_id = ReqID}) ->
     State#state.from ! {ReqID, cancel, restart},
     {stop, normal, State};
-inform_peers({ok, ReqID, Args={_, _, OldVnodeID, NewVnodeID, _}, CurrentPeers}, State=#state{req_id = ReqID}) ->
+inform_peers({ok, ReqID, Args={_, _, OldVnodeID, NewVnodeID}, CurrentPeers}, State=#state{req_id = ReqID}) ->
     lager:info("Restart Fsm: inform peers: old ~p new ~p.",[OldVnodeID, NewVnodeID]),
     dotted_db_vnode:inform_peers_restart(CurrentPeers, Args),
     {next_state, recovering_keys,
@@ -90,7 +90,7 @@ recovering_keys({ok, stage1, ReqID, Args}, State=#state{req_id = ReqID}) ->
 %% From the restarting node
 recovering_keys({ok, stage2, ReqID, Peer}, State=#state{req_id = ReqID}) ->
     lager:debug("Restart Fsm: stage2"),
-    dotted_db_vnode:inform_peers_restart2([Peer], {ReqID, State#state.new_id}),
+    dotted_db_vnode:inform_peers_restart2([Peer], {ReqID, State#state.new_id, State#state.old_id}),
     {next_state, recovering_keys, State};
 %% From one of the good nodes
 recovering_keys({ok, stage3, ReqID, Args}, State=#state{req_id = ReqID}) ->

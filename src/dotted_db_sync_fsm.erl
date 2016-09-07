@@ -32,7 +32,8 @@
     id_a            :: vnode_id(),
     node_b          :: vnode(),
     id_b            :: vnode_id(),
-    base_clock_b    :: vv(),
+    clock_b         :: bvv(),
+    watermark_b     :: vv_matrix(),
     miss_from_a     :: [{key(),dcc()}],
     timeout         :: non_neg_integer(),
     no_reply        :: boolean(),
@@ -79,13 +80,13 @@ sync_missing_B(timeout, State) ->
 sync_missing_B({cancel, ReqID, recovering}, State=#state{req_id = ReqID}) ->
     State#state.from ! {ReqID, cancel, sync},
     {stop, normal, State};
-sync_missing_B({ok, ReqID, IdA={_,_}, NodeB, EntryBInClockA},
+sync_missing_B({ok, ReqID, IdA={_,_}, NodeB, ClockA, PeersA},
                             State=#state{ req_id = ReqID, mode = ?ONE_WAY}) ->
-    dotted_db_vnode:sync_missing([NodeB], ReqID, IdA, EntryBInClockA),
+    dotted_db_vnode:sync_missing([NodeB], ReqID, IdA, ClockA, PeersA),
     {next_state, sync_repair_AB, State#state{node_b=NodeB, id_a=IdA}, State#state.timeout};
-sync_missing_B({ok, ReqID, IdA={_,_}, NodeB, EntryBInClockA},
+sync_missing_B({ok, ReqID, IdA={_,_}, NodeB, ClockA, PeersA},
                             State=#state{ req_id = ReqID, mode = ?TWO_WAY}) ->
-    dotted_db_vnode:sync_missing([NodeB], ReqID, IdA, EntryBInClockA),
+    dotted_db_vnode:sync_missing([NodeB], ReqID, IdA, ClockA, PeersA),
     {next_state, sync_missing_A, State#state{node_b=NodeB, id_a=IdA}, State#state.timeout}.
 
 %% @doc
@@ -95,16 +96,17 @@ sync_missing_A(timeout, State) ->
 sync_missing_A({cancel, ReqID, recovering}, State=#state{req_id = ReqID}) ->
     State#state.from ! {ReqID, cancel, sync},
     {stop, normal, State};
-sync_missing_A({ok, ReqID, IdB={_,_}, BaseClockB, EntryAInClockB, MissingFromA},
+sync_missing_A({ok, ReqID, IdB={_,_}, ClockB, WatermarkB, PeersB, MissingFromA},
                     State=#state{   req_id  = ReqID,
                                     mode    = ?TWO_WAY,
                                     node_a  = NodeA,
                                     timeout = Timeout}) ->
-    dotted_db_vnode:sync_missing([NodeA], ReqID, IdB, EntryAInClockB),
+    dotted_db_vnode:sync_missing([NodeA], ReqID, IdB, ClockB, PeersB),
     {next_state, sync_repair_AB,
-        State#state{id_b = IdB,
-                    base_clock_b = BaseClockB,
-                    miss_from_a  = MissingFromA},
+        State#state{id_b        = IdB,
+                    clock_b     = ClockB,
+                    watermark_b = WatermarkB,
+                    miss_from_a = MissingFromA},
         Timeout}.
 
 %% @doc
@@ -114,13 +116,13 @@ sync_repair_AB(timeout, State) ->
 sync_repair_AB({cancel, ReqID, recovering}, State=#state{req_id = ReqID}) ->
     State#state.from ! {ReqID, cancel, sync},
     {stop, normal, State};
-sync_repair_AB({ok, ReqID, IdB={_,_}, BaseClockB, _, MissingFromA},
+sync_repair_AB({ok, ReqID, IdB={_,_}, ClockB, WatermarkB, _, MissingFromA},
         State=#state{   req_id      = ReqID,
                         mode        = ?ONE_WAY,
                         no_reply    = NoReply,
                         from        = From,
                         node_a      = NodeA}) ->
-    dotted_db_vnode:sync_repair( [NodeA], {ReqID, IdB, BaseClockB, MissingFromA, NoReply}),
+    dotted_db_vnode:sync_repair( [NodeA], {ReqID, IdB, ClockB, WatermarkB, MissingFromA, NoReply}),
     case NoReply of
         true ->
             From ! {ReqID, ok, sync},
@@ -128,7 +130,7 @@ sync_repair_AB({ok, ReqID, IdB={_,_}, BaseClockB, _, MissingFromA},
         false ->
             {next_state, sync_ack, State#state{id_b = IdB}, State#state.timeout}
     end;
-sync_repair_AB({ok, ReqID, IdA={_,_}, BaseClockA, _, MissingFromB},
+sync_repair_AB({ok, ReqID, IdA={_,_}, ClockA, WatermarkA, _, MissingFromB},
         State=#state{   req_id       = ReqID,
                         mode         = ?TWO_WAY,
                         no_reply     = NoReply,
@@ -137,10 +139,11 @@ sync_repair_AB({ok, ReqID, IdA={_,_}, BaseClockA, _, MissingFromB},
                         node_b       = NodeB,
                         id_a         = IdA,
                         id_b         = IdB,
-                        base_clock_b = BaseClockB,
+                        clock_b      = ClockB,
+                        watermark_b  = WatermarkB,
                         miss_from_a  = MissingFromA}) ->
-    dotted_db_vnode:sync_repair( [NodeA], {ReqID, IdB, BaseClockB, MissingFromA, NoReply}),
-    dotted_db_vnode:sync_repair( [NodeB], {ReqID, IdA, BaseClockA, MissingFromB, NoReply}),
+    dotted_db_vnode:sync_repair( [NodeA], {ReqID, IdB, ClockB, WatermarkB, MissingFromA, NoReply}),
+    dotted_db_vnode:sync_repair( [NodeB], {ReqID, IdA, ClockA, WatermarkA, MissingFromB, NoReply}),
     case NoReply of
         true ->
             From ! {ReqID, ok, sync},

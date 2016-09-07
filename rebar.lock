@@ -104,5 +104,5 @@
   2},
  {<<"swc">>,
   {git,"git://github.com/ricardobcl/ServerWideClocks",
-       {ref,"c3d0504f907b236b7630ad503aea344cf5dd63c7"}},
+       {ref,"84642ab0e4db73ceb79240e8abe3bd92058b375a"}},
   0}].

@@ -87,7 +87,7 @@ start(_StartType, _StartArgs) ->
                 integer_to_list(?REPLICATION_FACTOR) ++ ", " ++
                 integer_to_list(?BUFFER_STRIP_INTERVAL) ++ ", " ++
                 integer_to_list(?DEFAULT_SYNC_INTERVAL) ++ ", " ++
-                integer_to_list(?DEFAULT_REPLICATION_FAIL_RATIO) ++ ", " ++
+                float_to_list(?DEFAULT_REPLICATION_FAIL_RATIO) ++ ", " ++
                 integer_to_list(?DEFAULT_NODE_KILL_RATE) ++ ", " ++
                 integer_to_list(?REPORT_TICK_INTERVAL) ++ "\n"
             ),
