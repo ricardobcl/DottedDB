@@ -429,7 +429,12 @@ def clock_entries_plot(type, DS,DE,BS,BE):
 
 
 ## Sync Size Transferred
-def sync_paper4():
+def sync_paper4(
+    types = ['hhh','hlh','lhh','llh','hhl','hll','lhl','lll'],
+          # ['hhh','hhl','hlh','hll','lhh','lhl','llh','lll'],
+    types2 = ['hh','lh','hl','ll'],
+          # ['hh','hl','lh','ll'],
+    filename_ext=''):
 
     # Basic
     basic_mt = OrderedDict()
@@ -470,9 +475,7 @@ def sync_paper4():
     final_offset= 0
 
 
-    # types = ['hhh']
-    types = ['hhh','hlh','lhh','llh','hhl','hll','lhl','lll']
-    # types = ['hhh','hhl','hlh','hll','lhh','lhl','llh','lll']
+    # types = ['hhh','hlh','lhh','llh','hhl','hll','lhl','lll']
     for t in types:
         change_current_basic(cluster_path + 'cluster_basic/sync_'+t+'/')
 
@@ -504,9 +507,7 @@ def sync_paper4():
         basic_total[t] = (basic_ctx[t][BS[t]:BE[t],10] + basic_md[t][BS[t]:BE[t],10] + basic_pl[t][BS[t]:BE[t],10])
 
 
-    types2 = ['hh','lh','hl','ll']
-    # types2 = ['hh','hl','lh','ll']
-    # types2 = ['hh','hl']
+    # types2 = ['hh','lh','hl','ll']
     for t in types2:
         change_current_dotted(cluster_path + 'cluster_dotted/sync_'+t+'/')
 
@@ -587,7 +588,7 @@ def sync_paper4():
     # plt.xlim(xmin=-5)
     # plt.xlim(xmax=(BE['hhh']-BS['hhh'])*5 - 40)
     # plt.ylim(ymin=-0.5)
-    pp = PdfPages(test_path + 'sync_size_bar_abs_paper.pdf')
+    pp = PdfPages(test_path + 'sync_size_bar_abs_paper' + filename_ext + '.pdf')
     pp.savefig()
     pp.close()
 
@@ -628,7 +629,7 @@ def sync_paper4():
     # plt.xlim(xmin=-5)
     # plt.xlim(xmax=(BE['hhh']-BS['hhh'])*5 - 40)
     # plt.ylim(ymin=-0.5)
-    pp = PdfPages(test_path + 'sync_size_pct_bar_paper.pdf')
+    pp = PdfPages(test_path + 'sync_size_pct_bar_paper' + filename_ext + '.pdf')
     pp.savefig()
     pp.close()
 
@@ -667,7 +668,7 @@ def sync_paper4():
     # plt.xlim(xmin=-5)
     # plt.xlim(xmax=(BE['hhh']-BS['hhh'])*5 - 40)
     # plt.ylim(ymin=-0.5)
-    pp = PdfPages(test_path + 'sync_size_pct_bar_ctx_paper.pdf')
+    pp = PdfPages(test_path + 'sync_size_pct_bar_ctx_paper' + filename_ext + '.pdf')
     pp.savefig()
     pp.close()
 
@@ -707,7 +708,7 @@ def sync_paper4():
     # plt.xlim(xmin=-5)
     # plt.xlim(xmax=(BE['hhh']-BS['hhh'])*5 - 40)
     # plt.ylim(ymin=-0.5)
-    pp = PdfPages(test_path + 'sync_size_pct_bar_md_paper.pdf')
+    pp = PdfPages(test_path + 'sync_size_pct_bar_md_paper' + filename_ext + '.pdf')
     pp.savefig()
     pp.close()
 
@@ -740,7 +741,7 @@ def sync_paper4():
     plt.xlim(xmin=-5)
     plt.xlim(xmax=(BE['hhh']-BS['hhh'])*5)
     plt.ylim(ymin=-5)
-    pp = PdfPages(test_path + 'sync_size_basic_paper.pdf')
+    pp = PdfPages(test_path + 'sync_size_basic_paper' + filename_ext + '.pdf')
     pp.savefig()
     pp.close()
 
@@ -758,9 +759,9 @@ def sync_paper4():
     plt.legend(loc='upper right')
     # plt.ylim((-1,62))
     plt.xlim(xmin=-5)
-    plt.xlim(xmax=(DE['hh']-DS['hh'])*5)
+    plt.xlim(xmax=(DE[types2[0]]-DS[types2[0]])*5)
     plt.ylim(ymin=-5)
-    pp = PdfPages(test_path + 'sync_size_dotted_paper.pdf')
+    pp = PdfPages(test_path + 'sync_size_dotted_paper' + filename_ext + '.pdf')
     pp.savefig()
     pp.close()
 
@@ -828,7 +829,12 @@ def sync_size_plot(type, DS,DE,BS,BE):
 
 
 ## Repair Latency
-def sync_paper3():
+def sync_paper3(
+    types = ['hhh','hhl','hlh','hll','lhh','lhl','llh','lll'],
+    types2 = ['hh','hl','lh','ll'],
+    filename_ext=''):
+
+
     basic = {}
     basicX = {}
     basicY = {}
@@ -840,7 +846,7 @@ def sync_paper3():
     dottedY2 = {}
     dotted_ecdf = {}
 
-    types = ['hhh','hhl','hlh','hll','lhh','lhl','llh','lll']
+    # types = ['hhh','hhl','hlh','hll','lhh','lhl','llh','lll']
     for t in types:
         change_current_basic(cluster_path + 'cluster_basic/sync_'+t+'/')
         basic[t] = load_cluster_basic_csv('write-latency_gauge.csv', False)
@@ -849,7 +855,7 @@ def sync_paper3():
         basicX[t] = np.linspace(min(basicY[t]), max(basicY[t]))
         basicY2[t] = basic_ecdf[t](basicX[t])
 
-    types2 = ['hh','hl','lh','ll']
+    # types2 = ['hh','hl','lh','ll']
     for t in types2:
         change_current_dotted(cluster_path + 'cluster_dotted/sync_'+t+'/')
         dotted[t] = load_cluster_dotted_csv('write-latency_gauge.csv', False)
@@ -869,7 +875,8 @@ def sync_paper3():
     # plt.title("10000 ms Sync Interval, 100% Replication Loss")
     t1 = 'hhh'
     t2 = 'lhh'
-    t3 =  'hh'
+    # t3 =  'hh'
+    t3 = types2[0]
     plt.step(basicX[t1]/1000.0, basicY2[t1], label="BasicDB, High MT/Leaf Ratio", lw=l, marker=ms[0], alpha=0.6, color='b')
     plt.step(basicX[t2]/1000.0, basicY2[t2], label="BasicDB, Low MT/Leaf Ratio", lw=l, marker=ms[1], alpha=0.6, color='r')
     plt.step(dottedX[t3]/1000.0, dottedY2[t3], label="DottedDB", lw=l, marker=ms[3], alpha=0.6, color='g')
@@ -879,7 +886,7 @@ def sync_paper3():
     plt.xlim(xmin=-0.5)
     plt.xlim(xmax=990)
     plt.ylim(ymax=1.05)
-    pp = PdfPages(test_path + 'repair_latency_hh_paper.pdf')
+    pp = PdfPages(test_path + 'repair_latency_hh_paper' + filename_ext + '.pdf')
     pp.savefig()
     pp.close()
 
@@ -891,7 +898,8 @@ def sync_paper3():
     # plt.title("10000 ms Sync Interval, 20% Replication Loss")
     t1 = 'hhl'
     t2 = 'lhl'
-    t3 =  'hl'
+    # t3 =  'hl'
+    t3 = types2[1]
     plt.step(basicX[t1]/1000.0, basicY2[t1], label="BasicDB, High MT/Leaf Ratio", lw=l, marker=ms[0], alpha=0.6, color='b')
     plt.step(basicX[t2]/1000.0, basicY2[t2], label="BasicDB, Low MT/Leaf Ratio", lw=l, marker=ms[1], alpha=0.6, color='r')
     plt.step(dottedX[t3]/1000.0, dottedY2[t3], label="DottedDB", lw=l, marker=ms[3], alpha=0.6, color='g')
@@ -901,7 +909,7 @@ def sync_paper3():
     plt.xlim(xmin=-0.5)
     plt.xlim(xmax=195)
     plt.ylim(ymax=1.05)
-    pp = PdfPages(test_path + 'repair_latency_hl_paper.pdf')
+    pp = PdfPages(test_path + 'repair_latency_hl_paper' + filename_ext + '.pdf')
     pp.savefig()
     pp.close()
 
@@ -913,7 +921,8 @@ def sync_paper3():
     # plt.title("100 ms Sync Interval, 100% Replication Loss")
     t1 = 'hlh'
     t2 = 'llh'
-    t3 =  'lh'
+    # t3 =  'lh'
+    t3 = types2[2]
     plt.step(basicX[t1]/1000.0, basicY2[t1], label="BasicDB, High MT/Leaf Ratio", lw=l, marker=ms[0], alpha=0.6, color='b')
     plt.step(basicX[t2]/1000.0, basicY2[t2], label="BasicDB, Low MT/Leaf Ratio", lw=l, marker=ms[1], alpha=0.6, color='r')
     plt.step(dottedX[t3]/1000.0, dottedY2[t3], label="DottedDB", lw=l, marker=ms[3], alpha=0.6, color='g')
@@ -923,7 +932,7 @@ def sync_paper3():
     plt.xlim(xmin=-0.5)
     plt.xlim(xmax=790)
     plt.ylim(ymax=1.05)
-    pp = PdfPages(test_path + 'repair_latency_lh_paper.pdf')
+    pp = PdfPages(test_path + 'repair_latency_lh_paper' + filename_ext + '.pdf')
     pp.savefig()
     pp.close()
 
@@ -935,7 +944,8 @@ def sync_paper3():
     # plt.title("100 ms Sync Interval, 20% Replication Loss")
     t1 = 'hll'
     t2 = 'lll'
-    t3 =  'll'
+    # t3 =  'll'
+    t3 = types2[3]
     plt.step(basicX[t1]/1000.0, basicY2[t1], label="BasicDB, High MT/Leaf Ratio", lw=l, marker=ms[0], alpha=0.6, color='b')
     plt.step(basicX[t2]/1000.0, basicY2[t2], label="BasicDB, Low MT/Leaf Ratio", lw=l, marker=ms[1], alpha=0.6, color='r')
     plt.step(dottedX[t3]/1000.0, dottedY2[t3], label="DottedDB", lw=l, marker=ms[3], alpha=0.6, color='g')
@@ -947,7 +957,7 @@ def sync_paper3():
     plt.xlim(xmin=-0.5)
     plt.xlim(xmax=68)
     plt.ylim(ymax=1.05)
-    pp = PdfPages(test_path + 'repair_latency_ll_paper.pdf')
+    pp = PdfPages(test_path + 'repair_latency_ll_paper' + filename_ext + '.pdf')
     pp.savefig()
     pp.close()
 
@@ -1371,7 +1381,12 @@ def perf_paper():
 
 
 ## Hit Ratio
-def sync_paper1():
+def sync_paper1(
+    types = ['hhh','hhl','hlh','hll','lhh','lhl','llh','lll'],
+    types2 = ['hh','hl','lh','ll'],
+    filename_ext=''):
+
+
     initial_offset= -1
     final_offset= 0
 
@@ -1398,7 +1413,7 @@ def sync_paper1():
     dotted_tm = {}
     dotted3 = {}
 
-    types = ['hhh','hhl','hlh','hll','lhh','lhl','llh','lll']
+    # types = ['hhh','hhl','hlh','hll','lhh','lhl','llh','lll']
     for t in types:
         change_current_basic(cluster_path + 'cluster_basic/sync_'+t+'/')
 
@@ -1417,7 +1432,7 @@ def sync_paper1():
         basic_pct[t] = np.array(map(lambda x: min(x,100), basic_pct0[t]))
 
 
-    types2 = ['hh','hl','lh','ll']
+    # types2 = ['hh','hl','lh','ll']
     for t in types2:
         change_current_dotted(cluster_path + 'cluster_dotted/sync_'+t+'/')
 
@@ -1455,7 +1470,7 @@ def sync_paper1():
     plt.ylim((-1,62))
     plt.xlim(xmin=-15)
     plt.xlim(xmax=(BE['hhh']-BS['hhh'])*5 + 30)
-    pp = PdfPages(test_path + 'basic_hit_ratio_paper.pdf')
+    pp = PdfPages(test_path + 'basic_hit_ratio_paper' + filename_ext + '.pdf')
     pp.savefig()
     pp.close()
 
@@ -1478,10 +1493,10 @@ def sync_paper1():
     # plt.ylim(ymin=-150.0)
     plt.ylim((75,100.3))
     plt.xlim(xmin=-15)
-    plt.xlim(xmax=(DE['hh']-DS['hh'])*5 + 30)
+    plt.xlim(xmax=(DE[types2[0]]-DS[types2[0]])*5 + 30)
     # plt.xlim(xmax=1375)
     # save in PDF
-    pp = PdfPages(test_path + 'dotted_hit_ratio_paper.pdf')
+    pp = PdfPages(test_path + 'dotted_hit_ratio_paper' + filename_ext + '.pdf')
     pp.savefig()
     pp.close()
 
@@ -1507,7 +1522,7 @@ def sync_paper1():
     plt.ylim((-1,101))
     plt.xlim(xmin=-15)
     plt.xlim(xmax=(BE['hhh']-BS['hhh'])*5 + 30)
-    pp = PdfPages(test_path + 'hit_ratio_paper.pdf')
+    pp = PdfPages(test_path + 'hit_ratio_paper' + filename_ext + '.pdf')
     pp.savefig()
     pp.close()
 
@@ -1572,10 +1587,14 @@ def sync_hit_ratio_plot(type, DS,DE,BS,BE):
 
 
 ## Sync Metadata
-def sync_paper2():
+def sync_paper2(
+    types = ['hhh','hhl','hlh','hll','lhh','lhl','llh','lll'],
+    types2 = ['hh','hl','lh','ll'],
+    filename_ext=''):
+
+
     initial_offset= -1
     final_offset= 0
-
 
     # Basic
     basic_total = {}
@@ -1602,7 +1621,7 @@ def sync_paper2():
 
     mt_metadata = 11
 
-    types = ['hhh','hhl','hlh','hll','lhh','lhl','llh','lll']
+    # types = ['hhh','hhl','hlh','hll','lhh','lhl','llh','lll']
     for t in types:
         change_current_basic(cluster_path + 'cluster_basic/sync_'+t+'/')
 
@@ -1627,7 +1646,7 @@ def sync_paper2():
         basic_total[t].fill(basic_size[t])
         print str(basic_size[t]/1024.0) + " KB\n"
 
-    types2 = ['hh','hl','lh','ll']
+    # types2 = ['hh','hl','lh','ll']
     for t in types2:
         change_current_dotted(cluster_path + 'cluster_dotted/sync_'+t+'/')
 
@@ -1684,7 +1703,7 @@ def sync_paper2():
     plt.xlim(xmin=-5)
     plt.xlim(xmax=(BE['hhh']-BS['hhh'])*5)
     plt.ylim(ymin=-5)
-    pp = PdfPages(test_path + 'sync_metadata_paper.pdf')
+    pp = PdfPages(test_path + 'sync_metadata_paper' + filename_ext + '.pdf')
     pp.savefig()
     pp.close()
 
@@ -1964,6 +1983,11 @@ def main(argv):
         clock_entries_paper()
     elif arg1 == 'deletes':
         deletes_paper()
+    elif arg1 == 'strip':
+        strip_paper()
+    elif arg1 == 'perf':
+        perf_paper()
+    # for normal KL and VV (1st version of SWC)
     elif arg1 == 'sync1':
         sync_paper1() # hit ratio
     elif arg1 == 'sync2':
@@ -1972,10 +1996,27 @@ def main(argv):
         sync_paper3() # repair latency
     elif arg1 == 'sync4':
         sync_paper4() # sync size
-    elif arg1 == 'strip':
-        strip_paper()
-    elif arg1 == 'perf':
-        perf_paper()
+    # for matrix watermark (2nd version of SWC)
+    elif arg1 == 'sync1m':
+        sync_paper1( # hit ratio
+            ['hhh','hhl','hlh','hll','lhh','lhl','llh','lll'],
+            ['hh_mat','hl_mat','lh_mat','ll_mat'],
+            '_matrix')
+    elif arg1 == 'sync2m':
+        sync_paper2( # metadata size
+            ['hhh','hhl','hlh','hll','lhh','lhl','llh','lll'],
+            ['hh_mat','hl_mat','lh_mat','ll_mat'],
+            '_matrix')
+    elif arg1 == 'sync3m':
+        sync_paper3( # repair latency
+            ['hhh','hhl','hlh','hll','lhh','lhl','llh','lll'],
+            ['hh_mat','hl_mat','lh_mat','ll_mat'],
+            '_matrix')
+    elif arg1 == 'sync4m':
+        sync_paper4( # sync size
+            ['hhh','hlh','lhh','llh','hhl','hll','lhl','lll'],
+            ['hh_mat','lh_mat','hl_mat','ll_mat'],
+            '_matrix')
     else:
         print "No args :("
 
