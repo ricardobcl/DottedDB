@@ -13,8 +13,14 @@
 +A 256
 
 ## Increase number of concurrent ports/sockets
--env ERL_MAX_PORTS 4096
+-env ERL_MAX_PORTS 8192
 
 ## Tweak GC to run more often
 -env ERL_FULLSWEEP_AFTER 10
+
+##Set the distribution buffer busy limit in KB
++zdbbl 1024000
+
+## Set port parallelism scheduling hint
++spp true
 
