@@ -9,6 +9,7 @@
             , add_stats/1
             , add_stats/2
             , notify/2
+            , notify2/1
             , start_bench/0
             , end_bench/1
             , start/0
@@ -59,6 +60,10 @@ add_stats(NewStats, OptionalHeader) ->
 notify(Name, 0.0) -> notify(Name, 0);
 notify(Name, Value) ->
     gen_server:cast(?MODULE, {notify, Name, Value}).
+
+notify2([]) -> ok;
+notify2(StatsList) ->
+    gen_server:cast(?MODULE, {notify2, StatsList}).
 
 %% @doc Store the time at which the benchmark started
 start_bench() ->
@@ -198,7 +203,38 @@ handle_cast({notify, {gauge, Name}, Value}, State = #state{active = true}) ->
     Timestamp = Mega * 1000000 + Sec,
     ets:insert(stats_gauge, {Name, [{Timestamp, Value} | List]}),
     % ok = folsom_metrics:notify({gauge, Name}, Value),
-    {noreply, State}.
+    {noreply, State};
+
+
+%% Ignore notifications if active flag is set to false.
+handle_cast({notify2,_}, State=#state{active = false}) ->
+    lager:info("Stats: ignored notification!"),
+    {noreply, State};
+
+handle_cast({notify2, StatsList}, State = #state{
+                            last_write_time = LWT,
+                            flush_interval = FI,
+                            timer = Timer,
+                            active = true}) ->
+    Now = os:timestamp(),
+    TimeSinceLastReport = timer:now_diff(Now, LWT) / 1000, %% To get the diff in milliseconds
+    TimeSinceLastWarn = timer:now_diff(Now, State#state.last_warn) / 1000,
+    NewState = case TimeSinceLastReport > (FI * 2) andalso TimeSinceLastWarn > ?WARN_INTERVAL of
+        true ->
+            lager:warning("dotted_db_stats has not reported in ~.2f milliseconds\n", [TimeSinceLastReport]),
+            {message_queue_len, QLen} = process_info(self(), message_queue_len),
+            lager:warning("stats process mailbox size = ~w\n", [QLen]),
+            State#state{last_warn = Now};
+        false ->
+            State
+    end,
+    case Timer of
+        undefined ->
+            lager:warning("dotted_db_stats is not flushing received data (start the timer)\n");
+        _ -> ok
+    end,
+    notify_list(StatsList),
+    {noreply, NewState}.
 
 
 
@@ -233,6 +269,26 @@ code_change(_OldVsn, State, _Extra) ->
 create_table() ->
     (ets:info(?ETS) /= undefined) orelse
         ets:new(?ETS, [named_table, public, set, {write_concurrency, true}]).
+
+
+notify_list([]) -> ok;
+notify_list([{counter, Name, Value}| Tail]) ->
+    ok = folsom_metrics:notify({counter, Name}, {inc, Value}),
+    notify_list(Tail);
+notify_list([{gauge, Name, Value} | Tail]) ->
+    List = case ets:lookup(stats_gauge, Name) of
+        [] -> [];
+        [{Name, L}] -> L
+    end,
+    {Mega, Sec, _} = erlang:now(),
+    Timestamp = Mega * 1000000 + Sec,
+    ets:insert(stats_gauge, {Name, [{Timestamp, Value} | List]}),
+    notify_list(Tail);
+notify_list([{histogram, Name, Value} | Tail]) ->
+    ok = folsom_metrics:notify({histogram, Name}, Value),
+    ok = folsom_metrics:notify({units, Name}, {inc, 1}),
+    notify_list(Tail).
+
 
 
 process_stats(Now, State) ->
