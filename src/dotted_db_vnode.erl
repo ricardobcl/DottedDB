@@ -765,29 +765,26 @@ handle_sync_missing({sync_missing, ReqID, _RemoteID={RemoteIndex,_}, RemoteClock
     %             [State#state.id, RemoteID, DotsNotFound2, MissingKeys, RelevantMissingKeys, State#state.dotkeymap, StrippedObjects, State#state.clock])
     % end,
     % Optionally collect stats
-    case State#state.stats andalso MissingKeys > 0 of
+    case ?STAT_SYNC andalso State#state.stats andalso MissingKeys > 0 andalso length(StrippedObjects) > 0 of
         true ->
-            case length(StrippedObjects) > 0 of
-                true ->
-                    Ratio_Relevant_Keys = round(100*length(RelevantMissingKeys)/max(1,length(MissingKeys))),
-                    dotted_db_stats:notify({histogram, sync_relevant_ratio}, Ratio_Relevant_Keys),
+            Ratio_Relevant_Keys = round(100*length(RelevantMissingKeys)/max(1,length(MissingKeys))),
+            SRR = {histogram, sync_relevant_ratio, Ratio_Relevant_Keys},
 
-                    Ctx_Sent_Strip = [dotted_db_object:get_context(Obj) || {_Key, Obj} <- StrippedObjects],
-                    Sum_Ctx_Sent_Strip = lists:sum([length(VV) || VV <- Ctx_Sent_Strip]),
-                    Ratio_Sent_Strip = Sum_Ctx_Sent_Strip/max(1,length(StrippedObjects)),
-                    dotted_db_stats:notify({histogram, sync_sent_dcc_strip}, Ratio_Sent_Strip),
+            Ctx_Sent_Strip = [dotted_db_object:get_context(Obj) || {_Key, Obj} <- StrippedObjects],
+            Sum_Ctx_Sent_Strip = lists:sum([length(VV) || VV <- Ctx_Sent_Strip]),
+            Ratio_Sent_Strip = Sum_Ctx_Sent_Strip/max(1,length(StrippedObjects)),
+            SSDS = {histogram, sync_sent_dcc_strip, Ratio_Sent_Strip},
 
-                    Size_Meta_Sent = byte_size(term_to_binary(Ctx_Sent_Strip)),
-                    dotted_db_stats:notify({histogram, sync_context_size}, Size_Meta_Sent),
-                    dotted_db_stats:notify({histogram, sync_metadata_size}, byte_size(term_to_binary(RemoteClock))),
+            Size_Meta_Sent = byte_size(term_to_binary(Ctx_Sent_Strip)),
+            SCS = {histogram, sync_context_size, Size_Meta_Sent},
+            SMS = {histogram, sync_metadata_size, byte_size(term_to_binary(RemoteClock))},
 
-                    Payload_Sent_Strip = [{Key, dotted_db_object:get_values(Obj)} || {Key, Obj} <- StrippedObjects],
-                    Size_Payload_Sent = byte_size(term_to_binary(Payload_Sent_Strip)),
-                    dotted_db_stats:notify({histogram, sync_payload_size}, Size_Payload_Sent),
+            Payload_Sent_Strip = [{Key, dotted_db_object:get_values(Obj)} || {Key, Obj} <- StrippedObjects],
+            Size_Payload_Sent = byte_size(term_to_binary(Payload_Sent_Strip)),
+            SPS = {histogram, sync_payload_size, Size_Payload_Sent},
 
-                    ok;
-                false -> ok
-            end;
+            dotted_db_stats:notify2([SRR, SSDS, SCS, SMS, SPS]),
+            ok;
         false -> ok
     end,
     % send the final objects and the base (contiguous) dots of the node clock to the asking node
@@ -837,20 +834,20 @@ handle_sync_repair({sync_repair, {ReqID, _RemoteNodeID={RemoteIndex,_}, RemoteCl
     update_jump_clock(RemoteIndex),
     State2 = gc_dotkeymap(State#state{clock=NodeClock, dotkeymap=DKM, non_stripped_keys=NSK, watermark=Watermark3}),
     % Optionally collect stats
-    case State2#state.stats of
+    case ?STAT_SYNC andalso State2#state.stats of
         true ->
             Repaired = length(RealMissingObjects),
             Sent = length(MissingObjects),
             Hit_Ratio = 100*Repaired/max(1, Sent),
-            case Sent =/= 0 of
+            SL = case Sent =/= 0 of
                 true ->
-                    dotted_db_stats:notify({histogram, sync_hit_ratio}, round(Hit_Ratio)),
-                    dotted_db_stats:notify({histogram, sync_sent_missing}, Sent),
-                    dotted_db_stats:notify({histogram, sync_sent_truly_missing}, Repaired);
+                    [{histogram, sync_hit_ratio, round(Hit_Ratio)},
+                    {histogram, sync_sent_missing, Sent},
+                    {histogram, sync_sent_truly_missing, Repaired}];
                 false ->
-                    dotted_db_stats:notify({histogram, sync_hit_ratio}, 100)
+                    [{histogram, sync_hit_ratio, 100}]
             end,
-            dotted_db_stats:notify({histogram, sync_metadata_size}, byte_size(term_to_binary(RemoteClock))),
+            dotted_db_stats:notify2([{histogram, sync_metadata_size, byte_size(term_to_binary(RemoteClock))} | SL]),
             ok;
         false ->
             ok
@@ -1215,27 +1212,43 @@ report_stats(State=#state{stats=true}) ->
          State#state.clock =/= swc_node:new() andalso
          State#state.watermark =/= swc_watermark:new() of
         true ->
-            dotted_db_stats:notify({histogram, kl_len}, swc_dotkeymap:size(State#state.dotkeymap)),
-            dotted_db_stats:notify({histogram, kl_size}, size(term_to_binary(State#state.dotkeymap))),
+            SSL = case ?STAT_STATE_LENGTH of
+                false -> [];
+                true ->
+                    KLLEN = {histogram, kl_len, swc_dotkeymap:size(State#state.dotkeymap)},
+                    MissingDots = [ miss_dots(Entry) || {_,Entry} <- State#state.clock ],
+                    BVVMD = {histogram, bvv_missing_dots, average(MissingDots)},
+                    {Del,Wrt} = State#state.non_stripped_keys,
+                    NumNSKeys = lists:sum([dict:size(Map) || {_, Map} <- Wrt]) + length(Del),
+                    NSKN = {histogram, nsk_number, NumNSKeys},
+                    [KLLEN, BVVMD, NSKN]
+            end,
 
-            MissingDots = [ miss_dots(Entry) || {_,Entry} <- State#state.clock ],
-            dotted_db_stats:notify({histogram, bvv_missing_dots}, average(MissingDots)),
-            dotted_db_stats:notify({histogram, bvv_size}, size(term_to_binary(State#state.clock))),
+            SSS = case ?STAT_STATE_SIZE of
+                false -> [];
+                true ->
+                    KLSIZE = {histogram, kl_size, size(term_to_binary(State#state.dotkeymap))},
+                    BVVSIZE = {histogram, bvv_size, size(term_to_binary(State#state.clock))},
+                    NSKSIZE = {histogram, nsk_size, size(term_to_binary(State#state.non_stripped_keys))},
+                    [KLSIZE, BVVSIZE, NSKSIZE]
+            end,
 
-            {Del,Wrt} = State#state.non_stripped_keys,
-            NumNSKeys = lists:sum([dict:size(Map) || {_, Map} <- Wrt]) + length(Del),
-            dotted_db_stats:notify({histogram, nsk_number}, NumNSKeys),
-            dotted_db_stats:notify({histogram, nsk_size}, size(term_to_binary(State#state.non_stripped_keys))),
+            SD = case ?STAT_DELETES of
+                false -> [];
+                true ->
+                    ADelKeys = length(ets_get_actual_deleted(State#state.atom_id)),
+                    IDelKeys = length(ets_get_issued_deleted(State#state.atom_id)),
+                    DI = {histogram, deletes_incomplete, IDelKeys},
+                    DC = {histogram, deletes_completed, ADelKeys},
 
-            ADelKeys = length(ets_get_actual_deleted(State#state.atom_id)),
-            IDelKeys = length(ets_get_issued_deleted(State#state.atom_id)),
-            dotted_db_stats:notify({histogram, deletes_incomplete}, IDelKeys),
-            dotted_db_stats:notify({histogram, deletes_completed}, ADelKeys),
+                    IWKeys = length(ets_get_issued_written(State#state.atom_id)),
+                    FWKeys = length(ets_get_final_written(State#state.atom_id)),
+                    WI = {histogram, write_incomplete, IWKeys},
+                    WC = {histogram, write_completed, FWKeys},
+                    [DI,DC,WI,WC]
+            end,
 
-            IWKeys = length(ets_get_issued_written(State#state.atom_id)),
-            FWKeys = length(ets_get_final_written(State#state.atom_id)),
-            dotted_db_stats:notify({histogram, write_incomplete}, IWKeys),
-            dotted_db_stats:notify({histogram, write_completed}, FWKeys),
+            dotted_db_stats:notify2(SD ++ SSS ++ SSL),
             ok;
         false ->
             ok
@@ -1280,26 +1293,26 @@ strip_save_batch([{Key, Obj} | Objects], S=#state{atom_id=ID}, Now, {NSK, Stripp
     %  3 * has values, but no causal context -> it's the final form for this write
     Acc = case {Values2, Context} of
         {[],[]} ->
-            ETS andalso dotted_db_stats:notify({histogram, entries_per_clock}, 0),
+            ?STAT_ENTRIES andalso dotted_db_stats:notify({histogram, entries_per_clock}, 0),
             ETS andalso ets_set_status(ID, Key, ?ETS_DELETE_STRIP),
             ETS andalso ets_set_strip_time(ID, Key, Now),
             ETS andalso notify_strip_delete_latency(Now, Now),
             ETS andalso ets_set_dots(ID, Key, []),
             {NSK, [{delete, Key}|StrippedObjects]};
         {_ ,[]} ->
-            ETS andalso dotted_db_stats:notify({histogram, entries_per_clock}, 1),
+            ?STAT_ENTRIES andalso dotted_db_stats:notify({histogram, entries_per_clock}, 1),
             ETS andalso ets_set_status(ID, Key, ?ETS_WRITE_STRIP),
             ETS andalso ets_set_strip_time(ID, Key, Now),
             ETS andalso notify_strip_write_latency(Now, Now),
             ETS andalso ets_set_dots(ID, Key, get_value_dots_for_ets(StrippedObj)),
             {NSK, [{put, Key, StrippedObj2}|StrippedObjects]};
         {[],_CC} ->
-            ETS andalso dotted_db_stats:notify({histogram, entries_per_clock}, length(Context)),
+            ?STAT_ENTRIES andalso dotted_db_stats:notify({histogram, entries_per_clock}, length(Context)),
             ETS andalso ets_set_status(ID, Key, ?ETS_DELETE_NO_STRIP),
             ETS andalso ets_set_dots(ID, Key, get_value_dots_for_ets(StrippedObj)),
             {[{Key, StrippedObj2}|NSK], [{put, Key, StrippedObj2}|StrippedObjects]};
         {_ ,_CC} ->
-            ETS andalso dotted_db_stats:notify({histogram, entries_per_clock}, length(Context)+1),
+            ?STAT_ENTRIES andalso dotted_db_stats:notify({histogram, entries_per_clock}, length(Context)+1),
             ETS andalso ets_set_status(ID, Key, ?ETS_WRITE_NO_STRIP),
             ETS andalso ets_set_dots(ID, Key, get_value_dots_for_ets(StrippedObj)),
             {[{Key, StrippedObj2}|NSK], [{put, Key, StrippedObj2}|StrippedObjects]}
@@ -1373,7 +1386,7 @@ strip_maybe_save_delete_batch([{Key={_,_}, Obj} | Objects], State, Now, {NSK, St
     %  3 * has values, but no causal context -> it's the final form for this write
     Acc = case {Values2, Context} of
         {[],[]} ->
-            ETS andalso dotted_db_stats:notify({histogram, entries_per_clock}, 0),
+            ?STAT_ENTRIES andalso dotted_db_stats:notify({histogram, entries_per_clock}, 0),
             ETS andalso ets_set_status(State#state.atom_id, Key, ?ETS_DELETE_STRIP),
             ETS andalso ets_set_strip_time(State#state.atom_id, Key, Now),
             ETS andalso notify_strip_delete_latency(ets_get_write_time(State#state.atom_id, Key), Now),
@@ -1381,7 +1394,7 @@ strip_maybe_save_delete_batch([{Key={_,_}, Obj} | Objects], State, Now, {NSK, St
             ETS andalso ets_set_dots(State#state.atom_id, Key, []),
             {NSK,                   [{delete, Key}|StrippedObjects]};
         {_ ,[]} ->
-            ETS andalso dotted_db_stats:notify({histogram, entries_per_clock}, 1),
+            ?STAT_ENTRIES andalso dotted_db_stats:notify({histogram, entries_per_clock}, 1),
             ETS andalso ets_set_status(State#state.atom_id, Key, ?ETS_WRITE_STRIP),
             ETS andalso ets_set_strip_time(State#state.atom_id, Key, Now),
             ETS andalso notify_strip_write_latency(ets_get_write_time(State#state.atom_id, Key), Now),
@@ -1450,7 +1463,7 @@ dictNSK2(Dot, {Key, Obj}, {Del, Batch}, State, Now, ETS) ->
     %  3 * has values, but no causal context -> it's the final form for this write
     case {Values2, Context} of
         {[],[]} -> % do the real delete
-            ETS andalso dotted_db_stats:notify({histogram, entries_per_clock}, 0),
+            ?STAT_ENTRIES andalso dotted_db_stats:notify({histogram, entries_per_clock}, 0),
             ETS andalso ets_set_status(State#state.atom_id, Key, ?ETS_DELETE_STRIP),
             ETS andalso ets_set_strip_time(State#state.atom_id, Key, Now),
             ETS andalso notify_strip_delete_latency(ets_get_write_time(State#state.atom_id, Key), Now),
@@ -1458,7 +1471,7 @@ dictNSK2(Dot, {Key, Obj}, {Del, Batch}, State, Now, ETS) ->
             ETS andalso ets_set_dots(State#state.atom_id, Key, []),
             {[Dot|Del], [{delete, Key}|Batch]};
         {_ ,[]} -> % write to disk without the version vector context
-            ETS andalso dotted_db_stats:notify({histogram, entries_per_clock}, 1),
+            ?STAT_ENTRIES andalso dotted_db_stats:notify({histogram, entries_per_clock}, 1),
             ETS andalso ets_set_status(State#state.atom_id, Key, ?ETS_WRITE_STRIP),
             ETS andalso ets_set_strip_time(State#state.atom_id, Key, Now),
             ETS andalso notify_strip_write_latency(ets_get_write_time(State#state.atom_id, Key), Now),
@@ -1578,26 +1591,26 @@ fill_strip_save_kvs([{Key={_,_}, Object} | Objects], RemoteClock, LocalClock, St
             %   * has values, but no causal context -> it's the final form for this write
             Acc = case {Values2, Context} of
                 {[],[]} ->
-                    ETS andalso dotted_db_stats:notify({histogram, entries_per_clock}, 0),
+                    ?STAT_ENTRIES andalso dotted_db_stats:notify({histogram, entries_per_clock}, 0),
                     ETS andalso ets_set_status(State#state.atom_id, Key, ?ETS_DELETE_STRIP),
                     ETS andalso ets_set_strip_time(State#state.atom_id, Key, Now),
                     ETS andalso notify_strip_delete_latency(Now, Now),
                     ETS andalso ets_set_dots(State#state.atom_id, Key, []),
                     {NSK,                         [{delete, Key}|StrippedObjects]};
                 {_ ,[]} ->
-                    ETS andalso dotted_db_stats:notify({histogram, entries_per_clock}, 1),
+                    ?STAT_ENTRIES andalso dotted_db_stats:notify({histogram, entries_per_clock}, 1),
                     ETS andalso ets_set_status(State#state.atom_id, Key, ?ETS_WRITE_STRIP),
                     ETS andalso ets_set_strip_time(State#state.atom_id, Key, Now),
                     ETS andalso notify_strip_write_latency(Now, Now),
                     ETS andalso ets_set_dots(State#state.atom_id, Key, get_value_dots_for_ets(StrippedObject2)),
                     {NSK,                         [{put, Key, StrippedObject2}|StrippedObjects]};
                 {[],_CC} ->
-                    ETS andalso dotted_db_stats:notify({histogram, entries_per_clock}, length(Context)),
+                    ?STAT_ENTRIES andalso dotted_db_stats:notify({histogram, entries_per_clock}, length(Context)),
                     ETS andalso ets_set_status(State#state.atom_id, Key, ?ETS_DELETE_NO_STRIP),
                     ETS andalso ets_set_dots(State#state.atom_id, Key, get_value_dots_for_ets(StrippedObject2)),
                     {[{Key, StrippedObject2}|NSK], [{put, Key, StrippedObject2}|StrippedObjects]};
                 {_ ,_CC} ->
-                    ETS andalso dotted_db_stats:notify({histogram, entries_per_clock}, length(Context)+1),
+                    ?STAT_ENTRIES andalso dotted_db_stats:notify({histogram, entries_per_clock}, length(Context)+1),
                     ETS andalso ets_set_status(State#state.atom_id, Key, ?ETS_WRITE_NO_STRIP),
                     ETS andalso ets_set_dots(State#state.atom_id, Key, get_value_dots_for_ets(StrippedObject2)),
                     {[{Key, StrippedObject2}|NSK], [{put, Key, StrippedObject2}|StrippedObjects]}
@@ -1700,18 +1713,30 @@ notify_write_latency(_FSMTime, undefined) ->
     % lager:warning("Undefined write time!!!!!!!!"),
     ok;
 notify_write_latency(FSMTime, WriteTime) ->
-    Delta = timer:now_diff(WriteTime, FSMTime)/1000,
-    dotted_db_stats:notify({gauge, write_latency}, Delta).
+    case ?STAT_WRITE_LATENCY of
+        false -> ok;
+        true ->
+            Delta = timer:now_diff(WriteTime, FSMTime)/1000,
+            dotted_db_stats:notify({gauge, write_latency}, Delta)
+    end.
 
 notify_strip_write_latency(undefined, _StripTime) -> ok;
 notify_strip_write_latency(WriteTime, StripTime) ->
-    Delta = timer:now_diff(StripTime, WriteTime)/1000,
-    dotted_db_stats:notify({gauge, strip_write_latency}, Delta).
+    case ?STAT_STRIP_LATENCY of
+        false -> ok;
+        true ->
+            Delta = timer:now_diff(StripTime, WriteTime)/1000,
+            dotted_db_stats:notify({gauge, strip_write_latency}, Delta)
+    end.
 
 notify_strip_delete_latency(undefined, _StripTime) -> ok;
 notify_strip_delete_latency(WriteTime, StripTime) ->
-    Delta = timer:now_diff(StripTime, WriteTime)/1000,
-    dotted_db_stats:notify({gauge, strip_delete_latency}, Delta).
+    case ?STAT_STRIP_LATENCY of
+        false -> ok;
+        true ->
+            Delta = timer:now_diff(StripTime, WriteTime)/1000,
+            dotted_db_stats:notify({gauge, strip_delete_latency}, Delta)
+    end.
 
 ensure_tuple(Id, Key) ->
     U = undefined,
