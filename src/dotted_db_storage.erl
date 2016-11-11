@@ -1,9 +1,11 @@
 -module(dotted_db_storage).
+-behaviour(gen_server).
 
 -include("dotted_db.hrl").
 -include_lib("rkvs/include/rkvs.hrl").
 
--export([   open/1,
+-export([
+            open/1,
             open/2,
             open/3,
             close/1,
@@ -18,32 +20,197 @@
             drop/1
          ]).
 
--type storage() :: #engine{}.
--type backend() :: bitcask | ets | leveldb.
+
+% gen_server callbacks
+-export([init/1,
+         handle_call/3,
+         handle_cast/2,
+         handle_info/2,
+         terminate/2,
+         code_change/3]).
+
+
+-type storage() :: pid().
+% -type backend() :: bitcask | ets | leveldb.
 
 -export_type([storage/0]).
 
 
-%% @doc open a storage, and by default use ETS as backend.
--spec open(list()) -> {ok, storage()} | {error, any()}.
+-record(state, {engine :: engine()}).
+
+%% @doc Start the server and open the storage, which by default is an ETS backend.
 open(Name) ->
     open(Name, {backend, ets}, []).
 
--spec open(list(), {backend, backend()}) -> {ok, storage()} | {error, any()}.
 open(Name, Backend) ->
     open(Name, Backend, []).
 
-%% @doc open a storage, and pass options to the backend.
--spec open(list(), {backend, backend()}, list()) -> {ok, storage()} | {error, any()}.
-open(Name, {backend, ets}, Options) ->
-    Options2 = [{value_encoding, term}|Options],
-    rkvs:open(Name, [{backend, rkvs_ets}|Options2]);
-open(Name, {backend, bitcask}, Options) ->
-    Options2 = [{value_encoding, term}|Options],
-    rkvs:open(Name, [{backend, rkvs_bitcask}|Options2]);
-open(Name, {backend, leveldb}, Options) ->
-    Options2 = [{value_encoding, term}|Options],
-    try_open_level_db(Name, 5, undefined, Options2).
+open(Name, {backend, Type}, Options) ->
+    case gen_server:start_link({local, ?MODULE}, ?MODULE, {Name, Type, [{value_encoding, term} | Options]}, []) of
+        {error, {already_started, Pid}} ->
+            {ok, Pid};
+        {ok, Pid} ->
+            {ok, Pid}
+    end.
+
+
+%% @doc close a storage
+-spec close(storage()) -> ok | {error, any()}.
+close(Storage) ->
+    gen_server:cast(Storage, close).
+
+
+%% @doc close a storage and remove all the data
+-spec destroy(storage()) -> ok | {error, any()}.
+destroy(Storage) ->
+    gen_server:cast(Storage, destroy).
+
+%% @doc get the value associated to the key
+-spec get(storage(), key()) -> any() | {error, term()}.
+get(Storage, Key) ->
+    gen_server:call(Storage, {get, Key}).
+
+%% @doc store the value associated to the key.
+-spec put(storage(), key(), value()) -> ok | {error, term()}.
+put(Storage, Key, Value) ->
+    gen_server:cast(Storage, {put, Key, Value}).
+
+%% @doc delete the value associated to the key
+-spec delete(storage(), key()) -> ok | {error, term()}.
+delete(Storage, Key) ->
+    gen_server:cast(Storage, {delete, Key}).
+
+%% @doc do multiple operations on the backend.
+-spec write_batch(storage(), multi_ops()) -> ok | {error, term()}.
+write_batch(Storage, Ops) ->
+    gen_server:cast(Storage, {put_batch, Ops}).
+
+%% @doc fold all keys with a function
+-spec fold_keys(storage(), fun(), any()) -> any() | {error, term()}.
+fold_keys(Storage, Fun, Acc) ->
+    gen_server:call(Storage, {fold_keys, Fun, Acc}).
+
+%% @doc fold all K/Vs with a function
+-spec fold(storage(), function(), any()) -> any() | {error, term()}.
+fold(Storage, Fun, Acc) ->
+    gen_server:call(Storage, {fold, Fun, Acc}).
+
+%% @doc Returns true if this backend has no values; otherwise returns false.
+-spec is_empty(storage()) -> boolean() | {error, term()}.
+is_empty(Storage) ->
+    gen_server:call(Storage, is_empty).
+
+%% @doc Delete all objects from this backend
+%% and return a fresh reference.
+-spec drop(storage()) -> {ok, storage()} | {error, term(), storage()}.
+drop(Storage) ->
+    gen_server:call(Storage, drop).
+
+
+
+
+%%====================================================================
+%% gen_server callbacks
+%%====================================================================
+
+init({Name, ets, Options}) ->
+    process_flag(trap_exit, true),
+    {ok, Engine} = rkvs:open(Name, [{backend, rkvs_ets}|Options]),
+    {ok, #state{engine = Engine}};
+init({Name, bitcask, Options}) ->
+    process_flag(trap_exit, true),
+    {ok, Engine} = rkvs:open(Name, [{backend, rkvs_bitcask}|Options]),
+    {ok, #state{engine = Engine}};
+init({Name, leveldb, Options}) ->
+    process_flag(trap_exit, true),
+    {ok, Engine} = try_open_level_db(Name, 5, undefined, Options),
+    {ok, #state{engine = Engine}}.
+
+
+handle_call({get, Key}, _From, State) ->
+    BKey = dotted_db_utils:encode_kv(Key),
+    Value = rkvs:get(State#state.engine, BKey),
+    {reply, Value, State};
+
+handle_call({fold_keys, Fun, Acc}, _From, State) ->
+    Res = rkvs:fold_keys(State#state.engine, Fun, Acc, []),
+    {reply, Res, State};
+
+handle_call({fold, Fun, Acc}, _From, State) ->
+    Res = rkvs:fold(State#state.engine, Fun, Acc, []),
+    {reply, Res, State};
+
+handle_call(is_empty, _From, State) ->
+    Res = rkvs:is_empty(State#state.engine),
+    {reply, Res, State};
+
+handle_call(drop, _From, State) ->
+    Res = drop(State#state.engine, 2, undefined),
+    {reply, Res, State}.
+
+
+handle_cast({put, Key, Value}, State) ->
+    BKey = dotted_db_utils:encode_kv(Key),
+    rkvs:put(State#state.engine, BKey, Value),
+    {noreply, State};
+
+handle_cast({delete, Key}, State) ->
+    BKey = dotted_db_utils:encode_kv(Key),
+    rkvs:clear(State#state.engine, BKey),
+    {noreply, State};
+
+handle_cast({put_batch, Ops}, State) ->
+    Fun = fun
+            ({put, K, V}) -> {put, dotted_db_utils:encode_kv(K), V};
+            ({delete, K}) -> {delete, dotted_db_utils:encode_kv(K)}
+        end,
+    rkvs:write_batch(State#state.engine, lists:map(Fun, Ops)),
+    {noreply, State};
+
+handle_cast(destroy, State) ->
+    rkvs:destroy(State#state.engine),
+    {stop, normal, State};
+
+handle_cast(close, State) ->
+    Ref = (State#state.engine)#engine.ref,
+    case Ref of
+        undefined ->
+            ok;
+        <<>> ->
+            ok;
+        _ ->
+            rkvs:close(State#state.engine)
+    end,
+    {stop, normal, State}.
+
+
+%% Informative calls
+% {noreply,NewState}
+% {noreply,NewState,Timeout}
+% {noreply,NewState,hibernate}
+% {stop,Reason,NewState}
+handle_info(_Message, _Server) ->
+    io:format("Generic info handler: '~p' '~p'~n",[_Message, _Server]),
+    {noreply, _Server}.
+
+
+terminate(_Reason, State) ->
+    Ref = (State#state.engine)#engine.ref,
+    case Ref of
+        undefined ->
+            ok;
+        <<>> ->
+            ok;
+        _ ->
+            rkvs:close(State#state.engine)
+    end.
+
+code_change(_OldVersion, _Server, _Extra) ->
+    {ok, _Server}.
+
+%%====================================================================
+%% Helper Functions
+%%====================================================================
 
 try_open_level_db(_Name, 0, LastError, _Options) ->
     {error, LastError};
@@ -70,72 +237,6 @@ try_open_level_db(Name, RetriesLeft, _, Options) ->
             {error, Reason}
     end.
 
-
-%% @doc close a storage
--spec close(storage()) -> ok | {error, any()}.
-close(Engine) ->
-    case Engine#engine.ref of
-        undefined ->
-            ok;
-        <<>> ->
-            ok;
-        _ ->
-            rkvs:close(Engine)
-    end.
-
-%% @doc close a storage and remove all the data
--spec destroy(storage()) -> ok | {error, any()}.
-destroy(Engine) ->
-    rkvs:destroy(Engine).
-
-%% @doc get the value associated to the key
--spec get(storage(), key()) -> any() | {error, term()}.
-get(Engine, Key) ->
-    BKey = dotted_db_utils:encode_kv(Key),
-    rkvs:get(Engine, BKey).
-
-%% @doc store the value associated to the key.
--spec put(storage(), key(), value()) -> ok | {error, term()}.
-put(Engine, Key, Value) ->
-    BKey = dotted_db_utils:encode_kv(Key),
-    rkvs:put(Engine, BKey, Value).
-
-%% @doc delete the value associated to the key
--spec delete(storage(), key()) -> ok | {error, term()}.
-delete(Engine, Key) ->
-    BKey = dotted_db_utils:encode_kv(Key),
-    rkvs:clear(Engine, BKey).
-
-%% @doc do multiple operations on the backend.
--spec write_batch(storage(), multi_ops()) -> ok | {error, term()}.
-write_batch(Engine, Ops) ->
-    Fun = fun
-            ({put, K, V}) -> {put, dotted_db_utils:encode_kv(K), V};
-            ({delete, K}) -> {delete, dotted_db_utils:encode_kv(K)}
-        end,
-    rkvs:write_batch(Engine, lists:map(Fun, Ops)).
-
-%% @doc fold all keys with a function
--spec fold_keys(storage(), fun(), any()) -> any() | {error, term()}.
-fold_keys(Engine, Fun, Acc0) ->
-    rkvs:fold_keys(Engine, Fun, Acc0, []).
-
-%% @doc fold all K/Vs with a function
--spec fold(storage(), function(), any()) -> any() | {error, term()}.
-fold(Engine, Fun, Acc0) ->
-    rkvs:fold(Engine, Fun, Acc0, []).
-
-%% @doc Returns true if this backend has no values; otherwise returns false.
--spec is_empty(storage()) -> boolean() | {error, term()}.
-is_empty(Engine) ->
-    rkvs:is_empty(Engine).
-
-
-%% @doc Delete all objects from this backend
-%% and return a fresh reference.
--spec drop(storage()) -> {ok, storage()} | {error, term(), storage()}.
-drop(Engine) ->
-    drop(Engine, 2, undefined).
 
 drop(Engine, 0, LastError) ->
     % os:cmd("rm -rf " ++ Engine#engine.name),
@@ -165,3 +266,5 @@ drop(Engine, RetriesLeft, _) ->
         {error, Reason} ->
             {error, Reason, Engine}
     end.
+
+
