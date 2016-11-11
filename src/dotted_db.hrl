@@ -38,9 +38,9 @@
 
 -define(STAT_DELETES, false).
 -define(STAT_ENTRIES, false).
--define(STAT_STATE_SIZE, true).
+-define(STAT_STATE_SIZE, false).
 -define(STAT_STATE_LENGTH, false).
--define(STAT_SYNC, true).
+-define(STAT_SYNC, false).
 -define(STAT_WRITE_LATENCY, false).
 -define(STAT_STRIP_LATENCY, false).
 
