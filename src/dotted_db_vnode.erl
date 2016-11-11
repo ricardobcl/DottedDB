@@ -283,8 +283,8 @@ handle_command(Cmd={replicate, _Args}, _Sender, State) ->
 handle_command(Cmd={sync_start, _ReqID}, _Sender, State) ->
     handle_sync_start(Cmd, State);
 
-handle_command(Cmd={sync_missing, _ReqID, _RemoteID, _RemoteClock, _RemotePeers}, _Sender, State) ->
-    handle_sync_missing(Cmd, State);
+handle_command(Cmd={sync_missing, _ReqID, _RemoteID, _RemoteClock, _RemotePeers}, Sender, State) ->
+    handle_sync_missing(Cmd, Sender, State);
 
 handle_command(Cmd={sync_repair, _Args}, _Sender, State) ->
     handle_sync_repair(Cmd, State);
@@ -745,57 +745,62 @@ handle_sync_start({sync_start, ReqID}, State=#state{mode=normal}) ->
     {reply, {ok, ReqID, State#state.id, NodeB, State#state.clock, PeersIDs}, State}.
 
 
-handle_sync_missing({sync_missing, ReqID, _, _, _}, State=#state{mode=recovering}) ->
+handle_sync_missing({sync_missing, ReqID, _, _, _}, _Sender, State=#state{mode=recovering}) ->
     {reply, {cancel, ReqID, recovering}, State};
-handle_sync_missing({sync_missing, ReqID, _RemoteID={RemoteIndex,_}, RemoteClock, RemotePeers}, State=#state{mode=normal}) ->
-    % calculate what dots are present locally that the asking node does not have
-    MissingDots = swc_node:missing_dots(State#state.clock, RemoteClock, RemotePeers),
-    % get the keys corresponding to the missing dots,
-    {MissingKeys0, _DotsNotFound} = swc_dotkeymap:get_keys(State#state.dotkeymap, MissingDots),
-    % remove duplicate keys
-    MissingKeys = sets:to_list(sets:from_list(MissingKeys0)),
-    % filter the keys that the asking node does not replicate
-    RelevantMissingKeys = filter_irrelevant_keys(MissingKeys, RemoteIndex),
-    % get each key's respective Object and strip any unnecessary causal information to save network
-    StrippedObjects = guaranteed_get_strip_list(RelevantMissingKeys, State),
-    % DotsNotFound2 = [ {A,B} || {A,B} <- DotsNotFound, B =/= [] andalso A =:= State#state.id],
-    % case DotsNotFound2 of
-    %     [] -> ok;
-    %     _  -> lager:info("\n\n~p to ~p:\n\tNotFound: ~p \n\tMiKeys: ~p \n\tRelKey: ~p \n\tKDM: ~p \n\tStrip: ~p \n\tBVV: ~p \n",
-    %             [State#state.id, RemoteID, DotsNotFound2, MissingKeys, RelevantMissingKeys, State#state.dotkeymap, StrippedObjects, State#state.clock])
-    % end,
-    % Optionally collect stats
-    case ?STAT_SYNC andalso State#state.stats andalso MissingKeys > 0 andalso length(StrippedObjects) > 0 of
-        true ->
-            Ratio_Relevant_Keys = round(100*length(RelevantMissingKeys)/max(1,length(MissingKeys))),
-            SRR = {histogram, sync_relevant_ratio, Ratio_Relevant_Keys},
+handle_sync_missing({sync_missing, ReqID, _RemoteID={RemoteIndex,_}, RemoteClock, RemotePeers}, Sender, State=#state{mode=normal}) ->
+    spawn(fun() ->
+        % calculate what dots are present locally that the asking node does not have
+        MissingDots = swc_node:missing_dots(State#state.clock, RemoteClock, RemotePeers),
+        % get the keys corresponding to the missing dots,
+        {MissingKeys0, _DotsNotFound} = swc_dotkeymap:get_keys(State#state.dotkeymap, MissingDots),
+        % remove duplicate keys
+        MissingKeys = sets:to_list(sets:from_list(MissingKeys0)),
+        % filter the keys that the asking node does not replicate
+        RelevantMissingKeys = filter_irrelevant_keys(MissingKeys, RemoteIndex),
+        % get each key's respective Object and strip any unnecessary causal information to save network
+        StrippedObjects = guaranteed_get_strip_list(RelevantMissingKeys, State),
+        % DotsNotFound2 = [ {A,B} || {A,B} <- DotsNotFound, B =/= [] andalso A =:= State#state.id],
+        % case DotsNotFound2 of
+        %     [] -> ok;
+        %     _  -> lager:info("\n\n~p to ~p:\n\tNotFound: ~p \n\tMiKeys: ~p \n\tRelKey: ~p \n\tKDM: ~p \n\tStrip: ~p \n\tBVV: ~p \n",
+        %             [State#state.id, RemoteID, DotsNotFound2, MissingKeys, RelevantMissingKeys, State#state.dotkeymap, StrippedObjects, State#state.clock])
+        % end,
+        % Optionally collect stats
+        case ?STAT_SYNC andalso State#state.stats andalso MissingKeys > 0 andalso length(StrippedObjects) > 0 of
+            true ->
+                Ratio_Relevant_Keys = round(100*length(RelevantMissingKeys)/max(1,length(MissingKeys))),
+                SRR = {histogram, sync_relevant_ratio, Ratio_Relevant_Keys},
 
-            Ctx_Sent_Strip = [dotted_db_object:get_context(Obj) || {_Key, Obj} <- StrippedObjects],
-            Sum_Ctx_Sent_Strip = lists:sum([length(VV) || VV <- Ctx_Sent_Strip]),
-            Ratio_Sent_Strip = Sum_Ctx_Sent_Strip/max(1,length(StrippedObjects)),
-            SSDS = {histogram, sync_sent_dcc_strip, Ratio_Sent_Strip},
+                Ctx_Sent_Strip = [dotted_db_object:get_context(Obj) || {_Key, Obj} <- StrippedObjects],
+                Sum_Ctx_Sent_Strip = lists:sum([length(VV) || VV <- Ctx_Sent_Strip]),
+                Ratio_Sent_Strip = Sum_Ctx_Sent_Strip/max(1,length(StrippedObjects)),
+                SSDS = {histogram, sync_sent_dcc_strip, Ratio_Sent_Strip},
 
-            Size_Meta_Sent = byte_size(term_to_binary(Ctx_Sent_Strip)),
-            SCS = {histogram, sync_context_size, Size_Meta_Sent},
-            SMS = {histogram, sync_metadata_size, byte_size(term_to_binary(RemoteClock))},
+                Size_Meta_Sent = byte_size(term_to_binary(Ctx_Sent_Strip)),
+                SCS = {histogram, sync_context_size, Size_Meta_Sent},
+                SMS = {histogram, sync_metadata_size, byte_size(term_to_binary(RemoteClock))},
 
-            Payload_Sent_Strip = [{Key, dotted_db_object:get_values(Obj)} || {Key, Obj} <- StrippedObjects],
-            Size_Payload_Sent = byte_size(term_to_binary(Payload_Sent_Strip)),
-            SPS = {histogram, sync_payload_size, Size_Payload_Sent},
+                Payload_Sent_Strip = [{Key, dotted_db_object:get_values(Obj)} || {Key, Obj} <- StrippedObjects],
+                Size_Payload_Sent = byte_size(term_to_binary(Payload_Sent_Strip)),
+                SPS = {histogram, sync_payload_size, Size_Payload_Sent},
 
-            dotted_db_stats:notify2([SRR, SSDS, SCS, SMS, SPS]),
-            ok;
-        false -> ok
-    end,
-    % send the final objects and the base (contiguous) dots of the node clock to the asking node
-    {reply, {   ok,
+                dotted_db_stats:notify2([SRR, SSDS, SCS, SMS, SPS]),
+                ok;
+            false -> ok
+        end,
+        % send the final objects and the base (contiguous) dots of the node clock to the asking node
+        riak_core_vnode:reply(
+            Sender,
+            {   ok,
                 ReqID,
                 State#state.id,
                 State#state.clock,
                 State#state.watermark,
                 swc_watermark:peers(State#state.watermark),
-                StrippedObjects},
-        State}.
+                StrippedObjects
+            })
+    end),
+    {noreply, State}.
 
 handle_sync_repair({sync_repair, {ReqID, _, _, _, _, NoReply}}, State=#state{mode=recovering}) ->
     lager:warning("repairing stuff"),
@@ -1045,7 +1050,7 @@ guaranteed_get_strip(Key, State) ->
                     dotted_db_object:new())};
         {error, Error} ->
             % some unexpected error
-            lager:error("Error reading a key from storage (guaranteed GET): ~p", [Error]),
+            lager:error("Error reading a key from storage (guaranteed GET) (2): ~p", [Error]),
             % assume that the key was lost, i.e. it's equal to not_found
             {Key, dotted_db_object:set_fsm_time(ets_get_fsm_time(State#state.atom_id, Key),
                     dotted_db_object:new())};
