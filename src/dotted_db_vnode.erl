@@ -588,8 +588,15 @@ handle_handoff_data(Data, State) ->
             {NodeKey, {NodeClock, DotKeyMap, Watermark, NSK}} ->
                 NodeClock2 = swc_node:join(NodeClock, State#state.clock),
                 State#state{clock = NodeClock2, dotkeymap = DotKeyMap, watermark = Watermark, non_stripped_keys = NSK};
+            {OtherNodeKey, {NodeClock, DotKeyMap, Watermark, NSK}} = Data ->
+                case is_binary(OtherNodeKey) andalso binary_to_term(OtherNodeKey) == NodeKey of
+                    true ->
+                        NodeClock2 = swc_node:join(NodeClock, State#state.clock),
+                        State#state{clock = NodeClock2, dotkeymap = DotKeyMap, watermark = Watermark, non_stripped_keys = NSK};
+                    false -> lager:warning("HANDOFF: strang data read -> ~p!",[Data])
+                end;
             {Key, Obj} ->
-                lager:info("HADOFF: key -> ~p | node key -> ~p \n obj -> ~p!", [Key, NodeKey, Obj]),
+                lager:info("HANDOFF: key -> ~p | node key -> ~p \n obj -> ~p!", [Key, NodeKey, Obj]),
                 {noreply, State2} = handle_command({replicate, {dummy_req_id, Key, Obj, ?DEFAULT_NO_REPLY}}, undefined, State),
                 State2
         end,
