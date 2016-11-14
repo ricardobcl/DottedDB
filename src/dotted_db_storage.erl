@@ -9,7 +9,7 @@
             open/2,
             open/3,
             close/1,
-            destroy/1,
+            % destroy/1,
             get/2,
             put/3,
             delete/2,
@@ -31,12 +31,17 @@
 
 
 -type storage() :: pid().
-% -type backend() :: bitcask | ets | leveldb.
+-type backend() :: bitcask | ets | leveldb.
 
 -export_type([storage/0]).
 
 
--record(state, {engine :: engine()}).
+-record(state, {
+            engine  :: engine(),
+            type    :: backend(),
+            name    :: list(),
+            options :: list()
+        }).
 
 %% @doc Start the server and open the storage, which by default is an ETS backend.
 open(Name) ->
@@ -46,8 +51,11 @@ open(Name, Backend) ->
     open(Name, Backend, []).
 
 open(Name, {backend, Type}, Options) ->
-    case gen_server:start_link({local, ?MODULE}, ?MODULE, {Name, Type, [{value_encoding, term} | Options]}, []) of
+    NameAtom = list_to_atom(lists:flatten(io_lib:format("~p", [Name]))),
+    case gen_server:start_link({local, NameAtom}, ?MODULE, {Name, Type, [{value_encoding, term} | Options]}, []) of
         {error, {already_started, Pid}} ->
+            lager:warning("Storage Server: already running, opeinig backend if it's closed."),
+            ok = gen_server:call(Pid, {open, Name, Type, [{value_encoding, term} | Options]}),
             {ok, Pid};
         {ok, Pid} ->
             {ok, Pid}
@@ -61,9 +69,9 @@ close(Storage) ->
 
 
 %% @doc close a storage and remove all the data
--spec destroy(storage()) -> ok | {error, any()}.
-destroy(Storage) ->
-    gen_server:cast(Storage, destroy).
+% -spec destroy(storage()) -> ok | {error, any()}.
+% destroy(Storage) ->
+%     gen_server:cast(Storage, destroy).
 
 %% @doc get the value associated to the key
 -spec get(storage(), key()) -> any() | {error, term()}.
@@ -104,7 +112,7 @@ is_empty(Storage) ->
 %% and return a fresh reference.
 -spec drop(storage()) -> {ok, storage()} | {error, term(), storage()}.
 drop(Storage) ->
-    gen_server:call(Storage, drop).
+    gen_server:call(Storage, {drop, Storage}).
 
 
 
@@ -113,19 +121,35 @@ drop(Storage) ->
 %% gen_server callbacks
 %%====================================================================
 
-init({Name, ets, Options}) ->
+init({Name, Type, Options}) ->
     process_flag(trap_exit, true),
-    {ok, Engine} = rkvs:open(Name, [{backend, rkvs_ets}|Options]),
-    {ok, #state{engine = Engine}};
-init({Name, bitcask, Options}) ->
-    process_flag(trap_exit, true),
-    {ok, Engine} = rkvs:open(Name, [{backend, rkvs_bitcask}|Options]),
-    {ok, #state{engine = Engine}};
-init({Name, leveldb, Options}) ->
-    process_flag(trap_exit, true),
-    {ok, Engine} = try_open_level_db(Name, 5, undefined, Options),
-    {ok, #state{engine = Engine}}.
+    {ok, Engine} = case Type of
+        ets ->      rkvs:open(Name, [{backend, rkvs_ets}|Options]);
+        bitcask ->  rkvs:open(Name, [{backend, rkvs_bitcask}|Options]);
+        leveldb ->  try_open_level_db(Name, 5, undefined, Options)
+    end,
+    {ok, #state{engine  = Engine,
+                name    = Name,
+                type    = Type,
+                options = Options}}.
 
+handle_call({open, Name, Type, Options}, _From, State) ->
+    case State#state.engine == undefined orelse State#state.engine == <<>> of
+        false ->
+            lager:info("Storage Server: open call: backend is active and opened already, nothing to do!"),
+            {reply, ok, State};
+        true ->
+            lager:info("Storage Server: open call: backend not opened -> opening now for type: ~p!",[Type]),
+            {ok, E} = case Type of
+                ets -> rkvs:open(Name, [{backend, rkvs_ets}|Options]);
+                bitcask -> rkvs:open(Name, [{backend, rkvs_bitcask}|Options]);
+                leveldb -> try_open_level_db(Name, 5, undefined, Options)
+            end,
+            {reply, ok, State#state{ engine  = E,
+                                     name    = Name,
+                                     type    = Type,
+                                     options = Options}}
+    end;
 
 handle_call({get, Key}, _From, State) ->
     BKey = dotted_db_utils:encode_kv(Key),
@@ -141,12 +165,27 @@ handle_call({fold, Fun, Acc}, _From, State) ->
     {reply, Res, State};
 
 handle_call(is_empty, _From, State) ->
-    Res = rkvs:is_empty(State#state.engine),
+    Ref = (State#state.engine)#engine.ref,
+    Res = case Ref of
+        undefined ->
+            true;
+        <<>> ->
+            true;
+        _ ->
+            rkvs:is_empty(State#state.engine)
+    end,
     {reply, Res, State};
 
-handle_call(drop, _From, State) ->
-    Res = drop(State#state.engine, 2, undefined),
-    {reply, Res, State}.
+handle_call({drop, Pid}, _From, State) ->
+    {NS, Res} = case drop(State#state.engine, 2, undefined) of
+        {ok, Engine} ->
+            NewState = State#state{engine = Engine},
+            {NewState, {ok, Pid}};
+        {error, Reason, Engine} ->
+            NewState = State#state{engine = Engine},
+            {NewState, {error, Reason, Pid}}
+    end,
+    {reply, Res, NS}.
 
 
 handle_cast({put, Key, Value}, State) ->
@@ -167,9 +206,9 @@ handle_cast({put_batch, Ops}, State) ->
     rkvs:write_batch(State#state.engine, lists:map(Fun, Ops)),
     {noreply, State};
 
-handle_cast(destroy, State) ->
-    rkvs:destroy(State#state.engine),
-    {stop, normal, State};
+% handle_cast(destroy, State) ->
+%     rkvs:destroy(State#state.engine),
+%     {stop, normal, State};
 
 handle_cast(close, State) ->
     Ref = (State#state.engine)#engine.ref,
@@ -181,7 +220,8 @@ handle_cast(close, State) ->
         _ ->
             rkvs:close(State#state.engine)
     end,
-    {stop, normal, State}.
+    {noreply, State}.
+    % {stop, normal, State}.
 
 
 %% Informative calls
@@ -242,12 +282,16 @@ drop(Engine, 0, LastError) ->
     % os:cmd("rm -rf " ++ Engine#engine.name),
     {error, LastError, Engine};
 drop(Engine, RetriesLeft, _) ->
-    ok = close(Engine),
+    case Engine#engine.ref of
+        undefined -> ok;
+        <<>> -> ok;
+        _ -> rkvs:close(Engine)
+    end,
     % Engine2 = Engine#engine{options=[{db_opts,{create_if_missing, false}}]},
     case rkvs:destroy(Engine) of
         ok ->
-            % {ok, Engine#engine{ref = undefined}};
-            {ok, Engine};
+            {ok, Engine#engine{ref = undefined}};
+            % {ok, Engine};
         %% Check specifically for lock error, this can be caused if
         %% a crashed vnode takes some time to flush leveldb information
         %% out to disk.  The process is gone, but the NIF resource cleanup
