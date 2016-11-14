@@ -577,6 +577,7 @@ handle_handoff_data(Data, State) ->
                 NodeClock2 = swc_node:join(NodeClock, State#state.clock),
                 State#state{clock = NodeClock2, dotkeymap = DotKeyMap, watermark = Watermark, non_stripped_keys = NSK};
             {Key, Obj} ->
+                lager:info("HADOFF: key -> ~p | node key -> ~p \n obj -> ~p!", [Key, NodeKey, Obj]),
                 {noreply, State2} = handle_command({replicate, {dummy_req_id, Key, Obj, ?DEFAULT_NO_REPLY}}, undefined, State),
                 State2
         end,
@@ -763,7 +764,7 @@ handle_sync_missing({sync_missing, ReqID, _RemoteID={RemoteIndex,_}, RemoteClock
         % case DotsNotFound2 of
         %     [] -> ok;
         %     _  -> lager:info("\n\n~p to ~p:\n\tNotFound: ~p \n\tMiKeys: ~p \n\tRelKey: ~p \n\tKDM: ~p \n\tStrip: ~p \n\tBVV: ~p \n",
-        %             [State#state.id, RemoteID, DotsNotFound2, MissingKeys, RelevantMissingKeys, State#state.dotkeymap, StrippedObjects, State#state.clock])
+        %             [State#state.id, RemoteIndex, DotsNotFound2, MissingKeys, RelevantMissingKeys, State#state.dotkeymap, StrippedObjects, State#state.clock])
         % end,
         % Optionally collect stats
         case ?STAT_SYNC andalso State#state.stats andalso MissingKeys > 0 andalso length(StrippedObjects) > 0 of
@@ -838,6 +839,15 @@ handle_sync_repair({sync_repair, {ReqID, _RemoteNodeID={RemoteIndex,_}, RemoteCl
     % Garbage Collect keys from the dotkeymap and delete keys with no causal context
     update_jump_clock(RemoteIndex),
     State2 = gc_dotkeymap(State#state{clock=NodeClock, dotkeymap=DKM, non_stripped_keys=NSK, watermark=Watermark3}),
+    % case MissingObjects == [] of
+    %     true -> ok;
+    %     false ->
+    %         lager:info("Repairing SYNC ~p !\n\n",[MissingObjects]),
+    %         lager:info("LId: ~p\nLC: ~p\n\n", [State2#state.id, State2#state.clock]),
+    %         lager:info("WM: ~p\n\n", [State2#state.watermark]),
+    %         lager:info("RI: ~p\nRC: ~p\n\n", [RemoteIndex, RemoteClock]),
+    %         lager:info("RW: ~p\n\n", [RemoteWatermark])
+    % end,
     % Optionally collect stats
     case ?STAT_SYNC andalso State2#state.stats of
         true ->
@@ -1653,7 +1663,7 @@ create_ets_all_keys(NewVnodeID) ->
     AtomID.
 
 delete_ets_all_keys(#state{atom_id=AtomID}) ->
-    _ = ((ets:info(AtomID) =:= undefined) andalso ets:delete(AtomID)),
+    _ = ((ets:info(AtomID) =/= undefined) andalso ets:delete(AtomID)),
     true.
 
 -spec get_ets_id(any()) -> atom().
@@ -1668,7 +1678,7 @@ sync_clocks(LocalClock, RemoteClock, RemoteIndex) ->
 
 
 update_watermark_after_sync(MyWatermark, RemoteWatermark, MyIndex, RemoteIndex, MyClock, RemoteClock) ->
-    % update my watermark with my what I know, based on my node clock
+    % update my watermark with what I know, based on my node clock
     MyWatermark2 = orddict:fold(
             fun (Vnode={Index,_}, _, Acc) ->
                     case Index == MyIndex of
@@ -1676,6 +1686,7 @@ update_watermark_after_sync(MyWatermark, RemoteWatermark, MyIndex, RemoteIndex, 
                         true -> swc_watermark:update_peer(Acc, Vnode, MyClock)
                     end
             end, MyWatermark, MyClock),
+    % update my watermark with what my peer knows, based on its node clock
     MyWatermark3 = orddict:fold(
             fun (Vnode={Index,_}, _, Acc) ->
                     case Index == RemoteIndex of

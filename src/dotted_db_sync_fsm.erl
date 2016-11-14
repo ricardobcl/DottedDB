@@ -61,7 +61,7 @@ init([ReqID, Mode, From, NodeA]) ->
         from        = From,
         node_a      = NodeA,
         node_b      = undefined,
-        timeout     = ?DEFAULT_TIMEOUT * 20, % sync is much slower than PUTs/GETs,
+        timeout     = ?DEFAULT_TIMEOUT,
         no_reply    = ?DEFAULT_NO_REPLY,
         acks        = 0
     },
