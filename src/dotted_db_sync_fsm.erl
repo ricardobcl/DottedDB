@@ -77,8 +77,8 @@ sync_start_A(timeout, State=#state{ req_id  = ReqID,
 sync_missing_B(timeout, State) ->
     State#state.from ! {State#state.req_id, timeout, { sync_missing_B, State#state.node_a } },
     {stop, normal, State};
-sync_missing_B({cancel, ReqID, recovering}, State=#state{req_id = ReqID}) ->
-    State#state.from ! {ReqID, cancel, sync},
+sync_missing_B({cancel, ReqID, _}, State=#state{req_id = ReqID}) ->
+    % State#state.from ! {ReqID, cancel, sync},
     {stop, normal, State};
 sync_missing_B({ok, ReqID, IdA={_,_}, NodeB, ClockA, PeersA},
                             State=#state{ req_id = ReqID, mode = ?ONE_WAY}) ->
@@ -93,8 +93,8 @@ sync_missing_B({ok, ReqID, IdA={_,_}, NodeB, ClockA, PeersA},
 sync_missing_A(timeout, State) ->
     State#state.from ! {State#state.req_id, timeout, { sync_missing_A, State#state.node_a, State#state.node_b} },
     {stop, normal, State};
-sync_missing_A({cancel, ReqID, recovering}, State=#state{req_id = ReqID}) ->
-    State#state.from ! {ReqID, cancel, sync},
+sync_missing_A({cancel, ReqID, _}, State=#state{req_id = ReqID}) ->
+    % State#state.from ! {ReqID, cancel, sync},
     {stop, normal, State};
 sync_missing_A({ok, ReqID, IdB={_,_}, ClockB, WatermarkB, PeersB, MissingFromA},
                     State=#state{   req_id  = ReqID,
@@ -113,16 +113,17 @@ sync_missing_A({ok, ReqID, IdB={_,_}, ClockB, WatermarkB, PeersB, MissingFromA},
 sync_repair_AB(timeout, State) ->
     State#state.from ! {State#state.req_id, timeout, { sync_repair_AB,  State#state.node_a, State#state.node_b} },
     {stop, normal, State};
-sync_repair_AB({cancel, ReqID, recovering}, State=#state{req_id = ReqID}) ->
-    State#state.from ! {ReqID, cancel, sync},
+sync_repair_AB({cancel, ReqID, _}, State=#state{req_id = ReqID}) ->
+    % State#state.from ! {ReqID, cancel, sync},
     {stop, normal, State};
-sync_repair_AB({ok, ReqID, IdB={_,_}, ClockB, WatermarkB, _, MissingFromA},
+sync_repair_AB({ok, ReqID, IdB={IndexB,_}, ClockB, WatermarkB, _, MissingFromA},
         State=#state{   req_id      = ReqID,
                         mode        = ?ONE_WAY,
                         no_reply    = NoReply,
                         from        = From,
+                        node_b      = NodeB={IndexB,_},
                         node_a      = NodeA}) ->
-    dotted_db_vnode:sync_repair( [NodeA], {ReqID, IdB, ClockB, WatermarkB, MissingFromA, NoReply}),
+    dotted_db_vnode:sync_repair( [NodeA], {ReqID, NodeB, ClockB, WatermarkB, MissingFromA, NoReply}),
     case NoReply of
         true ->
             From ! {ReqID, ok, sync},
@@ -130,20 +131,19 @@ sync_repair_AB({ok, ReqID, IdB={_,_}, ClockB, WatermarkB, _, MissingFromA},
         false ->
             {next_state, sync_ack, State#state{id_b = IdB}, State#state.timeout}
     end;
-sync_repair_AB({ok, ReqID, IdA={_,_}, ClockA, WatermarkA, _, MissingFromB},
+sync_repair_AB({ok, ReqID, IdA={IndexA,_}, ClockA, WatermarkA, _, MissingFromB},
         State=#state{   req_id       = ReqID,
                         mode         = ?TWO_WAY,
                         no_reply     = NoReply,
                         from         = From,
-                        node_a       = NodeA,
+                        node_a       = NodeA={IndexA,_},
                         node_b       = NodeB,
                         id_a         = IdA,
-                        id_b         = IdB,
                         clock_b      = ClockB,
                         watermark_b  = WatermarkB,
                         miss_from_a  = MissingFromA}) ->
-    dotted_db_vnode:sync_repair( [NodeA], {ReqID, IdB, ClockB, WatermarkB, MissingFromA, NoReply}),
-    dotted_db_vnode:sync_repair( [NodeB], {ReqID, IdA, ClockA, WatermarkA, MissingFromB, NoReply}),
+    dotted_db_vnode:sync_repair( [NodeA], {ReqID, NodeB, ClockB, WatermarkB, MissingFromA, NoReply}),
+    dotted_db_vnode:sync_repair( [NodeB], {ReqID, NodeA, ClockA, WatermarkA, MissingFromB, NoReply}),
     case NoReply of
         true ->
             From ! {ReqID, ok, sync},
@@ -154,15 +154,15 @@ sync_repair_AB({ok, ReqID, IdA={_,_}, ClockA, WatermarkA, _, MissingFromB},
 sync_repair_AB({ok, ReqID, IdA1={_,_}, _, _, _},
         State=#state{   req_id       = ReqID,
                         id_a         = IdA2}) when IdA1 =/= IdA2 ->
-    State#state.from ! {ReqID, cancel, sync},
+    % State#state.from ! {ReqID, cancel, sync},
     {stop, normal, State}.
 
 %% @doc
 sync_ack(timeout, State) ->
     State#state.from ! {State#state.req_id, timeout, { sync_ack,  State#state.node_a, State#state.node_b} },
     {stop, normal, State};
-sync_ack({cancel, ReqID, recovering}, State=#state{req_id = ReqID}) ->
-    State#state.from ! {ReqID, cancel, sync},
+sync_ack({cancel, ReqID, _}, State=#state{req_id = ReqID}) ->
+    % State#state.from ! {ReqID, cancel, sync},
     {stop, normal, State};
 sync_ack({ok, ReqID},  State=#state{ req_id = ReqID, mode = ?ONE_WAY}) ->
     State#state.from ! {ReqID, ok, sync},

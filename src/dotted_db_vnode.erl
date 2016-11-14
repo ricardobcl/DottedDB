@@ -483,6 +483,18 @@ handle_info(strip_keys, State=#state{mode=recovering}) ->
     {ok, State};
 handle_info(strip_keys, State=#state{mode=normal, non_stripped_keys=NSKeys}) ->
     NSKeys2 = read_strip_write(NSKeys, State),
+    % Take this time to filter timed-out entries in the "currently syncing peers" set
+    case get(current_sync) of
+        undefined -> ok;
+        Set ->
+            Now = os:timestamp(),
+            put(current_sync, ordsets:filter(
+                                fun({TS, _Peer}) ->
+                                    %% To get the diff in milliseconds
+                                    TimeElapsed = timer:now_diff(Now, TS) / 1000,
+                                    TimeElapsed < ?DEFAULT_TIMEOUT
+                                end, Set))
+    end,
     % Optionally collect stats
     case State#state.stats of
         true ->
@@ -738,12 +750,31 @@ handle_replicate({replicate, {ReqID, Key, NewObject, NoReply}}, State) ->
 handle_sync_start({sync_start, ReqID}, State=#state{mode=recovering}) ->
     {reply, {cancel, ReqID, recovering}, State};
 handle_sync_start({sync_start, ReqID}, State=#state{mode=normal}) ->
-    % choose a peer at random
-    NodeB = dotted_db_utils:random_from_list(dotted_db_utils:peers(State#state.index)),
-    % get my peers
-    PeersIDs = swc_watermark:peers(State#state.watermark),
-    % send a sync message to that node
-    {reply, {ok, ReqID, State#state.id, NodeB, State#state.clock, PeersIDs}, State}.
+    Now = os:timestamp(),
+    MyPeersIndexNodes = dotted_db_utils:peers(State#state.index),
+    Peer = case get(current_sync) of
+        undefined ->
+            Node = hd(MyPeersIndexNodes),
+            put(current_sync, ordsets:add_element({Now,Node}, ordsets:new())),
+            Node;
+        Set ->
+            case ordsets:subtract(MyPeersIndexNodes, Set) of
+                [] -> [];
+                Nodes ->
+                    Node = dotted_db_utils:random_from_list(Nodes),
+                    put(current_sync, ordsets:add_element({Now,Node}, Set)),
+                    Node
+            end
+    end,
+    case Peer of
+        [] ->
+            {reply, {cancel, ReqID, already_syncing}, State};
+        _ ->
+            % get my peers
+            PeersIDs = swc_watermark:peers(State#state.watermark),
+            % send a sync message to that node
+            {reply, {ok, ReqID, State#state.id, Peer, State#state.clock, PeersIDs}, State}
+    end.
 
 
 handle_sync_missing({sync_missing, ReqID, _, _, _}, _Sender, State=#state{mode=recovering}) ->
@@ -809,7 +840,7 @@ handle_sync_repair({sync_repair, {ReqID, _, _, _, _, NoReply}}, State=#state{mod
         true  -> {noreply, State};
         false -> {reply, {cancel, ReqID, recovering}, State}
     end;
-handle_sync_repair({sync_repair, {ReqID, _RemoteNodeID={RemoteIndex,_}, RemoteClock, RemoteWatermark, MissingObjects, NoReply}},
+handle_sync_repair({sync_repair, {ReqID, RemoteNode={RemoteIndex,_}, RemoteClock, RemoteWatermark, MissingObjects, NoReply}},
                    State=#state{mode=normal, index=MyIndex, clock=LocalClock, dotkeymap=DotKeyMap, watermark=Watermark1}) ->
     Now = os:timestamp(),
     % add information about the remote clock to our clock, but only for the remote node entry
@@ -848,6 +879,12 @@ handle_sync_repair({sync_repair, {ReqID, _RemoteNodeID={RemoteIndex,_}, RemoteCl
     %         lager:info("RI: ~p\nRC: ~p\n\n", [RemoteIndex, RemoteClock]),
     %         lager:info("RW: ~p\n\n", [RemoteWatermark])
     % end,
+    % Mark this Peer as available for sync again
+    case get(current_sync) of
+        undefined -> ok;
+        Set -> put(current_sync, ordsets:filter(fun({_TS, RN}) -> RN =/= RemoteNode end, Set))
+    end,
+
     % Optionally collect stats
     case ?STAT_SYNC andalso State2#state.stats of
         true ->
