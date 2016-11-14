@@ -204,7 +204,7 @@ desc "clean data from all dotted_db nodes"
 end
 
 desc "clean data from dotted_db node"
-task :clean_rel => :stop do
+task :clean_rel => :stop_rel do
   `rm -rf _build/default/rel`
   puts green " ========> Release Cleaned!           "
 end
