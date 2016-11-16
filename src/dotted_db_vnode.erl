@@ -398,7 +398,7 @@ handle_coverage(issued_deleted_keys, _KeySpaces, {_, RefId, _}, State) ->
                     {Key, storage_error};
                 Obj ->
                     % save the new k\v and remove unnecessary causal information
-                    {Key, dotted_db_object:strip(State#state.clock, Obj), Obj}
+                    {Key, dotted_db_object:strip(State#state.watermark, Obj), Obj}
             end;
         false ->
             {}
@@ -422,7 +422,7 @@ handle_coverage(written_keys, _KeySpaces, {_, RefId, _}, State) ->
                     {Key, storage_error};
                 Obj ->
                     % save the new k\v and remove unnecessary causal information
-                    {Key, dotted_db_object:strip(State#state.clock, Obj), Obj}
+                    {Key, dotted_db_object:strip(State#state.watermark, Obj), Obj}
             end;
         false ->
             {}
@@ -701,17 +701,21 @@ handle_write({write, {ReqID, Operation, Key, Value, Context, FSMTime}}, State) -
                 dotted_db_object:add_value({State#state.id, Dot}, Value, DiscardObject)
         end,
     NewObject = dotted_db_object:set_fsm_time(FSMTime, NewObject0),
-    % save the new k\v and remove unnecessary causal information
-    _= strip_save_batch([{Key, NewObject}], State#state{clock=NodeClock}, Now),
     % append the key to the tail of the KDM
     DotKeyMap = swc_dotkeymap:add_key(State#state.dotkeymap, State#state.id, Key, Dot),
+    % save the new object, while stripping the unnecessary causality
+    % _= strip_save_batch([{Key, NewObject}], State#state{clock=NodeClock}, Now),
+    NSK = case strip_save_batch([{Key, NewObject}], State#state{clock=NodeClock, dotkeymap=DotKeyMap}, Now) of
+        [] -> State#state.non_stripped_keys;
+        _  -> add_key_to_NSK(Key, NewObject, State#state.non_stripped_keys)
+    end,
     % Optionally collect stats
     case State#state.stats of
         true -> ok;
         false -> ok
     end,
     % return the updated node state
-    {reply, {ok, ReqID, NewObject}, State#state{clock = NodeClock, dotkeymap = DotKeyMap}}.
+    {reply, {ok, ReqID, NewObject}, State#state{clock = NodeClock, dotkeymap = DotKeyMap, non_stripped_keys = NSK}}.
 
 
 handle_replicate({replicate, {ReqID, Key, NewObject, NoReply}}, State) ->
@@ -732,7 +736,7 @@ handle_replicate({replicate, {ReqID, Key, NewObject, NoReply}}, State) ->
             % save the new object, while stripping the unnecessary causality
             case strip_save_batch([{Key, FinalObject}], State#state{clock=NodeClock, dotkeymap=DotKeyMap}, Now) of
                 [] -> State#state.non_stripped_keys;
-                _  -> add_key_to_NSK(Key, NewObject, State#state.non_stripped_keys)
+                _  -> add_key_to_NSK(Key, FinalObject, State#state.non_stripped_keys)
             end
     end,
     % Optionally collect stats
@@ -1094,9 +1098,10 @@ guaranteed_get(Key, State) ->
     end.
 
 guaranteed_get_strip_list(Keys, State) ->
-    lists:map(fun(Key) -> guaranteed_get_strip(Key, State) end, Keys).
+    MinWM = swc_watermark:min_all(State#state.watermark, ?ENTRIES_WM),
+    lists:map(fun(Key) -> guaranteed_get_strip(Key, MinWM, State) end, Keys).
 
-guaranteed_get_strip(Key, State) ->
+guaranteed_get_strip(Key, MinWM, State) ->
     case dotted_db_storage:get(State#state.storage, Key) of
         {error, not_found} ->
             % there is no key K in this node
@@ -1110,7 +1115,7 @@ guaranteed_get_strip(Key, State) ->
                     dotted_db_object:new())};
         Obj ->
             % get and fill the causal history of the local object
-            {Key, dotted_db_object:strip(State#state.clock, Obj)}
+            {Key, dotted_db_object:strip2(MinWM, Obj)}
     end.
 
 filter_irrelevant_keys(Keys, Index) ->
@@ -1207,20 +1212,21 @@ close_all(State=#state{ id          = Id,
     ok = dets:close(Dets).
 
 
-gc_dotkeymap(State=#state{dotkeymap = DotKeyMap, watermark = Watermark, non_stripped_keys = NSK}) ->
+gc_dotkeymap(State=#state{dotkeymap = DotKeyMap, watermark = Watermark, non_stripped_keys = _NSK}) ->
     case is_watermark_up_to_date(Watermark) of
         true ->
             % remove the keys from the dotkeymap that have a dot (corresponding to their position) smaller than the
             % minimum dot, i.e., this update is known by all nodes that replicate it and therefore can be removed
             % from the dotkeymap;
-            {DotKeyMap2, RemovedKeys} = swc_dotkeymap:prune(DotKeyMap, Watermark),
+            {DotKeyMap2, _RemovedKeys} = swc_dotkeymap:prune(DotKeyMap, Watermark),
             % remove entries in watermark from retired peers, that aren't needed anymore
             % (i.e. there isn't keys coordinated by those retired nodes in the DotKeyMap)
             OldPeersStillNotSynced = get_old_peers_still_not_synced(),
             Watermark2 = swc_watermark:prune_retired_peers(Watermark, DotKeyMap2, OldPeersStillNotSynced),
             % add the non stripped keys to the node state for later strip attempt
-            NSK2 = add_keys_from_dotkeymap_to_NSK(RemovedKeys, NSK),
-            State#state{dotkeymap = DotKeyMap2, non_stripped_keys=NSK2, watermark=Watermark2};
+            % NSK2 = add_keys_from_dotkeymap_to_NSK(RemovedKeys, NSK),
+            % State#state{dotkeymap = DotKeyMap2, non_stripped_keys=NSK2, watermark=Watermark2};
+            State#state{dotkeymap = DotKeyMap2, watermark=Watermark2};
         false ->
             {WM,_} = State#state.watermark,
             lager:info("Watermark not up to date: ~p entries, mode: ~p",[orddict:size(WM), State#state.mode]),
@@ -1334,14 +1340,15 @@ average(L) ->
 
 strip_save_batch(O,S,Now) -> strip_save_batch(O,S,Now,true).
 strip_save_batch(Objects, State, Now, ETS) ->
-    strip_save_batch(Objects, State, Now, {[],[]}, ETS).
+    MinWM = swc_watermark:min_all(State#state.watermark, ?ENTRIES_WM),
+    strip_save_batch(Objects, MinWM, State, Now, {[],[]}, ETS).
 
-strip_save_batch([], State, _Now, {NSK, StrippedObjects}, _ETS) ->
+strip_save_batch([], _MinWM, State, _Now, {NSK, StrippedObjects}, _ETS) ->
     ok = dotted_db_storage:write_batch(State#state.storage, StrippedObjects),
     NSK;
-strip_save_batch([{Key, Obj} | Objects], S=#state{atom_id=ID}, Now, {NSK, StrippedObjects}, ETS) ->
+strip_save_batch([{Key, Obj} | Objects], MinWM, S=#state{atom_id=ID}, Now, {NSK, StrippedObjects}, ETS) ->
     % removed unnecessary causality from the Object, based on the current node clock
-    StrippedObj = dotted_db_object:strip(S#state.clock, Obj),
+    StrippedObj = dotted_db_object:strip2(MinWM, Obj),
     {Values, Context} = dotted_db_object:get_container(StrippedObj),
     Values2 = [{D,V} || {D,V} <- Values, V =/= ?DELETE_OP],
     StrippedObj2 = dotted_db_object:set_container({Values2, Context}, StrippedObj),
@@ -1379,7 +1386,7 @@ strip_save_batch([{Key, Obj} | Objects], S=#state{atom_id=ID}, Now, {NSK, Stripp
     ETS andalso notify_write_latency(dotted_db_object:get_fsm_time(StrippedObj), Now),
     ETS andalso ets_set_write_time(ID, Key, Now),
     ETS andalso ets_set_fsm_time(ID, Key, dotted_db_object:get_fsm_time(StrippedObj)),
-    strip_save_batch(Objects, S, Now, Acc, ETS).
+    strip_save_batch(Objects, MinWM, S, Now, Acc, ETS).
 
 
 
@@ -1389,172 +1396,245 @@ strip_save_batch([{Key, Obj} | Objects], S=#state{atom_id=ID}, Now, {NSK, Stripp
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 %% @doc Used periodically to see which non-stripped keys can be stripped.
--spec read_strip_write({[{key(),vv()}], [{dot(), dict:dict()}]}, state()) -> {[{key(),vv()}], [{dot(), dict:dict()}]}.
+-spec read_strip_write({[key()], [{key(), [dot()]}]}, state()) -> {[key()], [{key(), [dot()]}]}.
 read_strip_write({Deletes, Writes}, State) ->
     Now = os:timestamp(),
-    {Stripped, NotStripped} = split_deletes(Deletes, State, {[],[]}),
-    Deletes2 = strip_maybe_save_delete_batch(Stripped, State, Now) ++ NotStripped,
-    Writes2 = compute_writes_NSK(Writes, State, [], [], Now),
-    {Deletes2, Writes2}.
+    % {Stripped, NotStripped} = split_deletes(Deletes, State, {[],[]}),
+    % Deletes2 = strip_maybe_save_delete_batch(Stripped, State, Now) ++ NotStripped,
+    delete_all_nsk(Deletes, State, Now, []),
+    Writes2 = compute_writes_NSK(Writes, State, Now),
+    {[], Writes2}.
 
 %% Take care of NSK deletes
 
-split_deletes([], _State, Acc) -> Acc;
-split_deletes([{Key, Ctx} | Deletes], State, {Stripped, NotStripped}) ->
-    case strip_context(Ctx,State#state.clock) of
-        [] -> 
-            case read_one_key(Key, State) of
-                0   ->
-                    ets_set_status(State#state.atom_id, Key, ?ETS_DELETE_STRIP),
-                    ets_set_strip_time(State#state.atom_id, Key, os:timestamp()),
-                    split_deletes(Deletes, State, {Stripped, NotStripped});
-                Obj ->
-                    split_deletes(Deletes, State, {[{Key, Obj}|Stripped], NotStripped})
-            end;
-        VV ->
-            split_deletes(Deletes, State, {Stripped, [{Key, VV}|NotStripped]})
-    end.
-
--spec strip_context(vv(), bvv()) -> vv().
-strip_context(Context, NodeClock) ->
-    FunFilter =
-        fun (Id, Counter) ->
-            {Base,_Dots} = swc_node:get(Id, NodeClock),
-            Counter > Base
-        end,
-    swc_vv:filter(FunFilter, Context).
+delete_all_nsk([], State, _Now, Acc) ->
+    ok = dotted_db_storage:write_batch(State#state.storage, Acc);
+delete_all_nsk([Key|Tail], State, Now, Acc) ->
+    ?STAT_ENTRIES andalso dotted_db_stats:notify({histogram, entries_per_clock}, 0),
+    ets_set_status(State#state.atom_id, Key, ?ETS_DELETE_STRIP),
+    ets_set_strip_time(State#state.atom_id, Key, Now),
+    notify_strip_delete_latency(ets_get_write_time(State#state.atom_id, Key), Now),
+    % ets_set_fsm_time(State#state.atom_id, Key, dotted_db_object:get_fsm_time(StrippedObj)),
+    ets_set_dots(State#state.atom_id, Key, []),
+    delete_all_nsk(Tail, State, Now, [{delete, Key} | Acc]).
 
 
-strip_maybe_save_delete_batch(O,S,Now) -> strip_maybe_save_delete_batch(O,S,Now,true).
-strip_maybe_save_delete_batch(Objects, State, Now, ETS) ->
-    strip_maybe_save_delete_batch(Objects, State, Now, {[],[]}, ETS).
+% split_deletes([], _State, Acc) -> Acc;
+% split_deletes([{Key, Ctx} | Deletes], State, {Stripped, NotStripped}) ->
+%     case strip_context(Ctx,State#state.clock) of
+%         [] -> 
+%             case read_one_key(Key, State) of
+%                 0   ->
+%                     ets_set_status(State#state.atom_id, Key, ?ETS_DELETE_STRIP),
+%                     ets_set_strip_time(State#state.atom_id, Key, os:timestamp()),
+%                     split_deletes(Deletes, State, {Stripped, NotStripped});
+%                 Obj ->
+%                     split_deletes(Deletes, State, {[{Key, Obj}|Stripped], NotStripped})
+%             end;
+%         VV ->
+%             split_deletes(Deletes, State, {Stripped, [{Key, VV}|NotStripped]})
+%     end.
 
-strip_maybe_save_delete_batch([], State, _Now, {NSK, StrippedObjects}, _ETS) ->
-    ok = dotted_db_storage:write_batch(State#state.storage, StrippedObjects),
-    NSK;
-strip_maybe_save_delete_batch([{Key={_,_}, Obj} | Objects], State, Now, {NSK, StrippedObjects}, ETS) ->
-    % removed unnecessary causality from the object, based on the current node clock
-    StrippedObj = dotted_db_object:strip(State#state.clock, Obj),
-    {Values, Context} = dotted_db_object:get_container(StrippedObj),
-    Values2 = [{D,V} || {D,V} <- Values, V =/= ?DELETE_OP],
-    StrippedObj2 = dotted_db_object:set_container({Values2, Context}, StrippedObj),
-    % the resulting object is one of the following options:
-    %  0 * it has no value but has causal history -> it's a delete, but still must be persisted
-    %  1 * it has no value and no causal history -> can be deleted
-    %  2 * has values, with causal context -> it's a normal write and we should persist
-    %  3 * has values, but no causal context -> it's the final form for this write
-    Acc = case {Values2, Context} of
-        {[],[]} ->
-            ?STAT_ENTRIES andalso dotted_db_stats:notify({histogram, entries_per_clock}, 0),
-            ETS andalso ets_set_status(State#state.atom_id, Key, ?ETS_DELETE_STRIP),
-            ETS andalso ets_set_strip_time(State#state.atom_id, Key, Now),
-            ETS andalso notify_strip_delete_latency(ets_get_write_time(State#state.atom_id, Key), Now),
-            ETS andalso ets_set_fsm_time(State#state.atom_id, Key, dotted_db_object:get_fsm_time(StrippedObj)),
-            ETS andalso ets_set_dots(State#state.atom_id, Key, []),
-            {NSK,                   [{delete, Key}|StrippedObjects]};
-        {_ ,[]} ->
-            ?STAT_ENTRIES andalso dotted_db_stats:notify({histogram, entries_per_clock}, 1),
-            ETS andalso ets_set_status(State#state.atom_id, Key, ?ETS_WRITE_STRIP),
-            ETS andalso ets_set_strip_time(State#state.atom_id, Key, Now),
-            ETS andalso notify_strip_write_latency(ets_get_write_time(State#state.atom_id, Key), Now),
-            ETS andalso ets_set_fsm_time(State#state.atom_id, Key, dotted_db_object:get_fsm_time(StrippedObj)),
-            ETS andalso ets_set_dots(State#state.atom_id, Key, get_value_dots_for_ets(StrippedObj)),
-            {NSK,                   [{put, Key, StrippedObj2}|StrippedObjects]};
-        {[],_CC} ->
-            {[{Key, Context}|NSK],  StrippedObjects};
-        {_ ,_CC} ->
-            {[{Key, Context}|NSK],  StrippedObjects}
-    end,
-    strip_maybe_save_delete_batch(Objects, State, Now, Acc, ETS).
+% -spec strip_context(vv(), bvv()) -> vv().
+% strip_context(Context, NodeClock) ->
+%     FunFilter =
+%         fun (Id, Counter) ->
+%             {Base,_Dots} = swc_node:get(Id, NodeClock),
+%             Counter > Base
+%         end,
+%     swc_vv:filter(FunFilter, Context).
+
+
+% strip_maybe_save_delete_batch(O,S,Now) -> strip_maybe_save_delete_batch(O,S,Now,true).
+% strip_maybe_save_delete_batch(Objects, State, Now, ETS) ->
+%     MinWM = swc_watermark:min_all(State#state.watermark, ?ENTRIES_WM),
+%     strip_maybe_save_delete_batch(Objects, MinWM, State, Now, {[],[]}, ETS).
+
+% strip_maybe_save_delete_batch([], _MinWM, State, _Now, {NSK, StrippedObjects}, _ETS) ->
+%     ok = dotted_db_storage:write_batch(State#state.storage, StrippedObjects),
+%     NSK;
+% strip_maybe_save_delete_batch([{Key={_,_}, Obj} | Objects], MinWM, State, Now, {NSK, StrippedObjects}, ETS) ->
+%     % removed unnecessary causality from the object, based on the current node clock
+%     StrippedObj = dotted_db_object:strip2(MinWM, Obj),
+%     {Values, Context} = dotted_db_object:get_container(StrippedObj),
+%     Values2 = [{D,V} || {D,V} <- Values, V =/= ?DELETE_OP],
+%     StrippedObj2 = dotted_db_object:set_container({Values2, Context}, StrippedObj),
+%     % the resulting object is one of the following options:
+%     %  0 * it has no value but has causal history -> it's a delete, but still must be persisted
+%     %  1 * it has no value and no causal history -> can be deleted
+%     %  2 * has values, with causal context -> it's a normal write and we should persist
+%     %  3 * has values, but no causal context -> it's the final form for this write
+%     Acc = case {Values2, Context} of
+%         {[],[]} ->
+%             ?STAT_ENTRIES andalso dotted_db_stats:notify({histogram, entries_per_clock}, 0),
+%             ETS andalso ets_set_status(State#state.atom_id, Key, ?ETS_DELETE_STRIP),
+%             ETS andalso ets_set_strip_time(State#state.atom_id, Key, Now),
+%             ETS andalso notify_strip_delete_latency(ets_get_write_time(State#state.atom_id, Key), Now),
+%             ETS andalso ets_set_fsm_time(State#state.atom_id, Key, dotted_db_object:get_fsm_time(StrippedObj)),
+%             ETS andalso ets_set_dots(State#state.atom_id, Key, []),
+%             {NSK,                   [{delete, Key}|StrippedObjects]};
+%         {_ ,[]} ->
+%             ?STAT_ENTRIES andalso dotted_db_stats:notify({histogram, entries_per_clock}, 1),
+%             ETS andalso ets_set_status(State#state.atom_id, Key, ?ETS_WRITE_STRIP),
+%             ETS andalso ets_set_strip_time(State#state.atom_id, Key, Now),
+%             ETS andalso notify_strip_write_latency(ets_get_write_time(State#state.atom_id, Key), Now),
+%             ETS andalso ets_set_fsm_time(State#state.atom_id, Key, dotted_db_object:get_fsm_time(StrippedObj)),
+%             ETS andalso ets_set_dots(State#state.atom_id, Key, get_value_dots_for_ets(StrippedObj)),
+%             {NSK,                   [{put, Key, StrippedObj2}|StrippedObjects]};
+%         {[],_CC} ->
+%             {[{Key, Context}|NSK],  StrippedObjects};
+%         {_ ,_CC} ->
+%             {[{Key, Context}|NSK],  StrippedObjects}
+%     end,
+%     strip_maybe_save_delete_batch(Objects, MinWM, State, Now, Acc, ETS).
 
 
 %% Take care of NSK writes
 
-compute_writes_NSK([], State, Batch, NSK, _Now) ->
+compute_writes_NSK(Writes, State, Now) ->
+    MinWM = swc_watermark:min_all(State#state.watermark, ?ENTRIES_WM),
+    compute_writes_NSK(Writes, State, MinWM, [], [], Now).
+
+compute_writes_NSK([], State, _MinWM, Batch, NewWrites, _Now) ->
     ok = dotted_db_storage:write_batch(State#state.storage, Batch),
-    NSK;
-compute_writes_NSK([{NodeID, Dict} |Tail], State, Batch, NSK, Now) ->
-    {DelDots, SaveBatch} = dict:fold(fun(Dot, Key, Acc) -> dictNSK(Dot, Key, Acc, State, Now) end, {[],[]}, Dict),
-    NewDict = remove_stripped_writes_NSK(DelDots, Dict),
-    case dict:size(NewDict) of
-        0 -> compute_writes_NSK(Tail, State, SaveBatch++Batch, NSK, Now);
-        _ -> compute_writes_NSK(Tail, State, SaveBatch++Batch, [{NodeID, NewDict}| NSK], Now)
-    end.
-
-dictNSK(Dot, {Key, undefined}, {Del, Batch}, State, Now) ->
-    case read_one_key(Key, State) of
-        0   ->
-            ets_set_status(State#state.atom_id, Key, ?ETS_DELETE_STRIP),
-            ets_set_strip_time(State#state.atom_id, Key, os:timestamp()),
-            {[Dot|Del], Batch};
-        Obj ->
-            dictNSK2(Dot, {Key, Obj}, {Del,Batch}, State, Now, true)
-    end;
-dictNSK(Dot, {Key, Ctx}, {Del, Batch}, State, Now) ->
-    case strip_context(Ctx, State#state.clock) of
-        [] ->
+    NewWrites;
+compute_writes_NSK([{Key, Dots} |Tail], State, MinWM, Batch, NewWrites, Now) ->
+    F = fun(_           , false) -> false;
+           ({Id,Counter}, true) ->
+                case orddict:find(Id, MinWM) of
+                    error -> false;
+                    {ok, StableTime} -> Counter =< StableTime
+                end
+        end,
+    case lists:foldl(F, true, Dots) of
+        true ->
             case read_one_key(Key, State) of
-                0 ->
+                false ->
                     ets_set_status(State#state.atom_id, Key, ?ETS_DELETE_STRIP),
-                    ets_set_strip_time(State#state.atom_id, Key, os:timestamp()),
-                    {[Dot|Del], Batch};
+                    ets_set_strip_time(State#state.atom_id, Key, Now),
+                    compute_writes_NSK(Tail, State, MinWM, Batch, NewWrites, Now);
                 Obj ->
-                    dictNSK2(Dot, {Key, Obj}, {Del,Batch}, State, Now, true)
+                    ID = State#state.atom_id,
+                    % removed unnecessary causality from the Object, based on the current node clock
+                    StrippedObj = dotted_db_object:strip2(MinWM, Obj),
+                    {Values, Context} = dotted_db_object:get_container(StrippedObj),
+                    Values2 = [{D,V} || {D,V} <- Values, V =/= ?DELETE_OP],
+                    StrippedObj2 = dotted_db_object:set_container({Values2, Context}, StrippedObj),
+                    % the resulting object is one of the following options:
+                    %  0 * it has no value but has causal history -> it's a delete, but still must be persisted
+                    %  1 * it has no value and no causal history -> can be deleted
+                    %  2 * has values, with causal context -> it's a normal write and we should persist
+                    %  3 * has values, but no causal context -> it's the final form for this write
+                    {Batch2, NewWrites2} = case {Values2, Context} of
+                        {[],[]} ->
+                            ?STAT_ENTRIES andalso dotted_db_stats:notify({histogram, entries_per_clock}, 0),
+                            ets_set_status(ID, Key, ?ETS_DELETE_STRIP),
+                            ets_set_strip_time(ID, Key, Now),
+                            notify_strip_delete_latency(Now, Now),
+                            ets_set_dots(ID, Key, []),
+                            {[{delete, Key} | Batch], NewWrites};
+                        {_ ,[]} ->
+                            ?STAT_ENTRIES andalso dotted_db_stats:notify({histogram, entries_per_clock}, 1),
+                            ets_set_status(ID, Key, ?ETS_WRITE_STRIP),
+                            ets_set_strip_time(ID, Key, Now),
+                            notify_strip_write_latency(Now, Now),
+                            ets_set_dots(ID, Key, get_value_dots_for_ets(StrippedObj)),
+                            {[{put, Key, StrippedObj2} | Batch], NewWrites};
+                        {_,_} ->
+                            Entry = {Key, [Dot || {Dot,_} <- Values]},
+                            {Batch, [Entry | NewWrites]}
+                    end,
+                    compute_writes_NSK(Tail, State, MinWM, Batch2, NewWrites2, Now)
             end;
-        _V ->
-            % case random:uniform() < 0.05 of
-            %     true  -> lager:info("STRIPPPPPPPPPPPPP:\nClock:~p\nCtx: ~p\n", [State#state.clock, V]);
-            %     false -> ok
-            % end,
-            {Del, Batch} %% not stripped yet; keep in the dict
+        false ->
+            compute_writes_NSK(Tail, State, MinWM, Batch, [{Key, Dots}|NewWrites], Now)
     end.
 
-dictNSK2(Dot, {Key, Obj}, {Del, Batch}, State, Now, ETS) ->
-    % removed unnecessary causality from the object, based on the current node clock
-    StrippedObj = dotted_db_object:strip(State#state.clock, Obj),
-    {Values, Context} = dotted_db_object:get_container(StrippedObj),
-    Values2 = [{D,V} || {D,V} <- Values, V =/= ?DELETE_OP],
-    StrippedObj2 = dotted_db_object:set_container({Values2, Context}, StrippedObj),
-    % the resulting object is one of the following options:
-    %  0 * it has no value but has causal history -> it's a delete, but still must be persisted
-    %  1 * it has no value and no causal history -> can be deleted
-    %  2 * has values, with causal context -> it's a normal write and we should persist
-    %  3 * has values, but no causal context -> it's the final form for this write
-    case {Values2, Context} of
-        {[],[]} -> % do the real delete
-            ?STAT_ENTRIES andalso dotted_db_stats:notify({histogram, entries_per_clock}, 0),
-            ETS andalso ets_set_status(State#state.atom_id, Key, ?ETS_DELETE_STRIP),
-            ETS andalso ets_set_strip_time(State#state.atom_id, Key, Now),
-            ETS andalso notify_strip_delete_latency(ets_get_write_time(State#state.atom_id, Key), Now),
-            ETS andalso ets_set_fsm_time(State#state.atom_id, Key, dotted_db_object:get_fsm_time(StrippedObj)),
-            ETS andalso ets_set_dots(State#state.atom_id, Key, []),
-            {[Dot|Del], [{delete, Key}|Batch]};
-        {_ ,[]} -> % write to disk without the version vector context
-            ?STAT_ENTRIES andalso dotted_db_stats:notify({histogram, entries_per_clock}, 1),
-            ETS andalso ets_set_status(State#state.atom_id, Key, ?ETS_WRITE_STRIP),
-            ETS andalso ets_set_strip_time(State#state.atom_id, Key, Now),
-            ETS andalso notify_strip_write_latency(ets_get_write_time(State#state.atom_id, Key), Now),
-            ETS andalso ets_set_fsm_time(State#state.atom_id, Key, dotted_db_object:get_fsm_time(StrippedObj)),
-            ETS andalso ets_set_dots(State#state.atom_id, Key, get_value_dots_for_ets(StrippedObj)),
-            {[Dot|Del], [{put, Key, StrippedObj2}|Batch]};
-        {_,_} ->
-            {Del, Batch} %% not stripped yet; keep in the dict
-    end.
 
-remove_stripped_writes_NSK([], Dict) -> Dict;
-remove_stripped_writes_NSK([H|T], Dict) ->
-    NewDict = dict:erase(H, Dict),
-    remove_stripped_writes_NSK(T, NewDict).
+
+
+
+%     {DelDots, SaveBatch} = dict:fold(fun(Dot, Key, Acc) -> dictNSK(Dot, Key, Acc, State, Now) end, {[],[]}, Dict),
+%     NewDict = remove_stripped_writes_NSK(DelDots, Dict),
+%     case dict:size(NewDict) of
+%         0 -> compute_writes_NSK(Tail, State, SaveBatch++Batch, NewWrites, Now);
+%         _ -> compute_writes_NSK(Tail, State, SaveBatch++Batch, [{NodeID, NewDict}| NewWrites], Now)
+%     end.
+
+% dictNSK(Dot, {Key, undefined}, {Del, Batch}, State, Now) ->
+%     case read_one_key(Key, State) of
+%         0   ->
+%             ets_set_status(State#state.atom_id, Key, ?ETS_DELETE_STRIP),
+%             ets_set_strip_time(State#state.atom_id, Key, os:timestamp()),
+%             {[Dot|Del], Batch};
+%         Obj ->
+%             dictNSK2(Dot, {Key, Obj}, {Del,Batch}, State, Now, true)
+%     end;
+% dictNSK(Dot, {Key, Ctx}, {Del, Batch}, State, Now) ->
+%     case strip_context(Ctx, State#state.clock) of
+%         [] ->
+%             case read_one_key(Key, State) of
+%                 0 ->
+%                     ets_set_status(State#state.atom_id, Key, ?ETS_DELETE_STRIP),
+%                     ets_set_strip_time(State#state.atom_id, Key, os:timestamp()),
+%                     {[Dot|Del], Batch};
+%                 Obj ->
+%                     dictNSK2(Dot, {Key, Obj}, {Del,Batch}, State, Now, true)
+%             end;
+%         _V ->
+%             % case random:uniform() < 0.05 of
+%             %     true  -> lager:info("STRIPPPPPPPPPPPPP:\nClock:~p\nCtx: ~p\n", [State#state.clock, V]);
+%             %     false -> ok
+%             % end,
+%             {Del, Batch} %% not stripped yet; keep in the dict
+%     end.
+
+% dictNSK2(Dot, {Key, Obj}, {Del, Batch}, State, Now, ETS) ->
+%     % removed unnecessary causality from the object, based on the current node clock
+%     StrippedObj = dotted_db_object:strip(State#state.clock, Obj),
+%     {Values, Context} = dotted_db_object:get_container(StrippedObj),
+%     Values2 = [{D,V} || {D,V} <- Values, V =/= ?DELETE_OP],
+%     StrippedObj2 = dotted_db_object:set_container({Values2, Context}, StrippedObj),
+%     % the resulting object is one of the following options:
+%     %  0 * it has no value but has causal history -> it's a delete, but still must be persisted
+%     %  1 * it has no value and no causal history -> can be deleted
+%     %  2 * has values, with causal context -> it's a normal write and we should persist
+%     %  3 * has values, but no causal context -> it's the final form for this write
+%     case {Values2, Context} of
+%         {[],[]} -> % do the real delete
+%             ?STAT_ENTRIES andalso dotted_db_stats:notify({histogram, entries_per_clock}, 0),
+%             ETS andalso ets_set_status(State#state.atom_id, Key, ?ETS_DELETE_STRIP),
+%             ETS andalso ets_set_strip_time(State#state.atom_id, Key, Now),
+%             ETS andalso notify_strip_delete_latency(ets_get_write_time(State#state.atom_id, Key), Now),
+%             ETS andalso ets_set_fsm_time(State#state.atom_id, Key, dotted_db_object:get_fsm_time(StrippedObj)),
+%             ETS andalso ets_set_dots(State#state.atom_id, Key, []),
+%             {[Dot|Del], [{delete, Key}|Batch]};
+%         {_ ,[]} -> % write to disk without the version vector context
+%             ?STAT_ENTRIES andalso dotted_db_stats:notify({histogram, entries_per_clock}, 1),
+%             ETS andalso ets_set_status(State#state.atom_id, Key, ?ETS_WRITE_STRIP),
+%             ETS andalso ets_set_strip_time(State#state.atom_id, Key, Now),
+%             ETS andalso notify_strip_write_latency(ets_get_write_time(State#state.atom_id, Key), Now),
+%             ETS andalso ets_set_fsm_time(State#state.atom_id, Key, dotted_db_object:get_fsm_time(StrippedObj)),
+%             ETS andalso ets_set_dots(State#state.atom_id, Key, get_value_dots_for_ets(StrippedObj)),
+%             {[Dot|Del], [{put, Key, StrippedObj2}|Batch]};
+%         {_,_} ->
+%             {Del, Batch} %% not stripped yet; keep in the dict
+%     end.
+
+% remove_stripped_writes_NSK([], Dict) -> Dict;
+% remove_stripped_writes_NSK([H|T], Dict) ->
+%     NewDict = dict:erase(H, Dict),
+%     remove_stripped_writes_NSK(T, NewDict).
 
 read_one_key(Key={_,_}, State) ->
     case dotted_db_storage:get(State#state.storage, Key) of
         {error, not_found} ->
-            0;
+            false;
         {error, Error} ->
             % some unexpected error
             lager:error("Error reading a key from storage: ~p", [Error]),
             % assume that the key was lost, i.e. it's equal to not_found
-            0;
+            false;
         Obj ->
             Obj
     end.
@@ -1574,40 +1654,44 @@ add_keys_to_NSK([{Key, Object}|Tail], NSK) ->
 add_key_to_NSK(Key, Object, NSK) ->
     add_key_to_NSK2(Key, dotted_db_object:get_container(Object), NSK).
 
-add_key_to_NSK2(_, {[],[]}, NSK) -> NSK;
-add_key_to_NSK2(Key, {[],Ctx}, {Del,Wrt}) ->
-    {[{Key, Ctx}|Del], Wrt};
-add_key_to_NSK2(Key, {DotValues,Ctx}, NSK) ->
-    KeyDots = [{Key, Dot, Ctx} || {Dot,_} <- DotValues],
-    add_writes_to_NSK(KeyDots, NSK).
+add_key_to_NSK2(_, {_,[]}, NSK) ->
+    % if the context is already empty, there's nothing to do
+    NSK;
+add_key_to_NSK2(Key, {[],_Ctx}, {Del,Wrt}) ->
+    % the context could be removed righ now, since there are no dots,
+    % which means all peers already saw this delete
+    {[Key|Del], Wrt};
+add_key_to_NSK2(Key, {DotValues,_Ctx}, {Del,Wrt}) ->
+    Entry = {Key, [Dot || {Dot,_} <- DotValues]},
+    {Del, [Entry | Wrt]}.
 
-add_writes_to_NSK([], NSK) -> NSK;
-add_writes_to_NSK([Head={_,_,_} | Tail], {Del,Wrt}) ->
-    Wrt2 = add_one_write_to_NSK(Head, Wrt),
-    add_writes_to_NSK(Tail, {Del,Wrt2}).
-
-
-add_keys_from_dotkeymap_to_NSK([], NSK) -> NSK;
-add_keys_from_dotkeymap_to_NSK([{NodeId, DotKeys}|Tail], {Del,Wrt}) ->
-    Wrt2 = lists:foldl(
-             fun({Dot,Key}, Acc) ->
-                     add_one_write_to_NSK({Key, {NodeId, Dot}, undefined}, Acc)
-             end,
-             Wrt,
-             DotKeys),
-    % Wrt2 = add_one_write_to_NSK({Key, {NodeID, Base+1}, undefined}, Wrt),
-    add_keys_from_dotkeymap_to_NSK(Tail, {Del,Wrt2}).
+% add_writes_to_NSK([], NSK) -> NSK;
+% add_writes_to_NSK([Head={_,_,_} | Tail], {Del,Wrt}) ->
+%     Wrt2 = add_one_write_to_NSK(Head, Wrt),
+%     add_writes_to_NSK(Tail, {Del,Wrt2}).
 
 
-add_one_write_to_NSK({Key, {NodeID,Counter}, Context}, []) ->
-    [{NodeID, dict:store(Counter, {Key, Context}, dict:new())}];
-add_one_write_to_NSK({Key, {NodeID, Counter}, Context}, [{NodeID2, Dict}|Tail])
-    when NodeID =:= NodeID2 andalso Counter =/= -1 ->
-    Dict2 =  dict:store(Counter, {Key, Context}, Dict),
-    [{NodeID, Dict2} | Tail];
-add_one_write_to_NSK(KV={_, {NodeID,_}, _}, [H={NodeID2, _}|Tail])
-    when NodeID =/= NodeID2  ->
-    [H | add_one_write_to_NSK(KV, Tail)].
+% add_keys_from_dotkeymap_to_NSK([], NSK) -> NSK;
+% add_keys_from_dotkeymap_to_NSK([{NodeId, DotKeys}|Tail], {Del,Wrt}) ->
+%     Wrt2 = lists:foldl(
+%              fun({Dot,Key}, Acc) ->
+%                      add_one_write_to_NSK({Key, {NodeId, Dot}, undefined}, Acc)
+%              end,
+%              Wrt,
+%              DotKeys),
+%     % Wrt2 = add_one_write_to_NSK({Key, {NodeID, Base+1}, undefined}, Wrt),
+%     add_keys_from_dotkeymap_to_NSK(Tail, {Del,Wrt2}).
+
+
+% add_one_write_to_NSK({Key, {NodeID,Counter}, Context}, []) ->
+%     [{NodeID, dict:store(Counter, {Key, Context}, dict:new())}];
+% add_one_write_to_NSK({Key, {NodeID, Counter}, Context}, [{NodeID2, Dict}|Tail])
+%     when NodeID =:= NodeID2 andalso Counter =/= -1 ->
+%     Dict2 =  dict:store(Counter, {Key, Context}, Dict),
+%     [{NodeID, Dict2} | Tail];
+% add_one_write_to_NSK(KV={_, {NodeID,_}, _}, [H={NodeID2, _}|Tail])
+%     when NodeID =/= NodeID2  ->
+%     [H | add_one_write_to_NSK(KV, Tail)].
 
 
 
@@ -1617,12 +1701,13 @@ add_one_write_to_NSK(KV={_, {NodeID,_}, _}, [H={NodeID2, _}|Tail])
 
 %% For recovering keys remotely after a vnode crash/failure (with lost key-values)
 fill_strip_save_kvs(Objects, RemoteClock, LocalClock, State, Now) ->
-    fill_strip_save_kvs(Objects, RemoteClock, LocalClock, State, Now, {[],[]}, true).
+    MinWM = swc_watermark:min_all(State#state.watermark, ?ENTRIES_WM),
+    fill_strip_save_kvs(Objects, RemoteClock, LocalClock, MinWM, State, Now, {[],[]}, true).
 
-fill_strip_save_kvs([], _, _, State, _Now, {NSK, StrippedObjects}, _ETS) ->
+fill_strip_save_kvs([], _, _, _, State, _Now, {NSK, StrippedObjects}, _ETS) ->
     ok = dotted_db_storage:write_batch(State#state.storage, StrippedObjects),
     {State#state.clock, State#state.dotkeymap, NSK};
-fill_strip_save_kvs([{Key={_,_}, Object} | Objects], RemoteClock, LocalClock, State, Now, {NSK, StrippedObjects}, ETS) ->
+fill_strip_save_kvs([{Key={_,_}, Object} | Objects], RemoteClock, LocalClock, MinWM, State, Now, {NSK, StrippedObjects}, ETS) ->
     % fill the Object with the sending node clock
     FilledObject = dotted_db_object:fill(Key, RemoteClock, Object),
     % get and fill the causal history of the local key
@@ -1632,14 +1717,14 @@ fill_strip_save_kvs([{Key={_,_}, Object} | Objects], RemoteClock, LocalClock, St
     % test if the FinalObject has newer information
     case (not dotted_db_object:equal_values(FinalObject, DiskObject)) orelse
          (dotted_db_object:get_values(FinalObject)==[] andalso dotted_db_object:get_values(DiskObject)==[]) of
-        false -> fill_strip_save_kvs(Objects, RemoteClock, LocalClock, State, Now, {NSK, StrippedObjects}, ETS);
+        false -> fill_strip_save_kvs(Objects, RemoteClock, LocalClock, MinWM, State, Now, {NSK, StrippedObjects}, ETS);
         true ->
             % add each new dot to our node clock
             StateNodeClock = dotted_db_object:add_to_node_clock(State#state.clock, FinalObject),
             % add new keys to the Dot-Key Mapping
             DKM = swc_dotkeymap:add_objects(State#state.dotkeymap, [{Key, dotted_db_object:get_container(FinalObject)}]),
             % removed unnecessary causality from the object, based on the current node clock
-            StrippedObject = dotted_db_object:strip(State#state.clock, FinalObject),
+            StrippedObject = dotted_db_object:strip2(MinWM, FinalObject),
             {Values, Context} = dotted_db_object:get_container(StrippedObject),
             Values2 = [{D,V} || {D,V} <- Values, V =/= ?DELETE_OP],
             StrippedObject2 = dotted_db_object:set_container({Values2, Context}, StrippedObject),
@@ -1677,7 +1762,7 @@ fill_strip_save_kvs([{Key={_,_}, Object} | Objects], RemoteClock, LocalClock, St
             ETS andalso notify_write_latency(dotted_db_object:get_fsm_time(StrippedObject2), Now),
             ETS andalso ets_set_write_time(State#state.atom_id, Key, Now),
             ETS andalso ets_set_fsm_time(State#state.atom_id, Key, dotted_db_object:get_fsm_time(StrippedObject2)),
-            fill_strip_save_kvs(Objects, RemoteClock, LocalClock, State#state{dotkeymap=DKM, clock=StateNodeClock}, Now, Acc, ETS)
+            fill_strip_save_kvs(Objects, RemoteClock, LocalClock, MinWM, State#state{dotkeymap=DKM, clock=StateNodeClock}, Now, Acc, ETS)
     end.
 
 

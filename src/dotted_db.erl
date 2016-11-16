@@ -785,7 +785,7 @@ process_vnode_states(States) ->
     % KLSize        = [ begin #{kl_size        := Res} = R , Res end || R<- Results ],
     % Syncs         = [ begin #{syncs          := Res} = R , Res end || R<- Results ],
     % SizeNSK         = [ begin #{nsk_size       := Res} = R , Res end || R<- Results ],
-    LengthNSK1      = [ begin #{nsk_len1       := Res} = R , Res end || R<- Results ],
+    % LengthNSK1      = [ begin #{nsk_len1       := Res} = R , Res end || R<- Results ],
     LengthNSK2      = [ begin #{nsk_len2       := Res} = R , Res end || R<- Results ],
     LengthRKeys     = [ begin #{rkeys_len      := Res} = R , Res end || R<- Results ],
     io:format("\n\n========= Vnodes ==========   \n"),
@@ -806,7 +806,7 @@ process_vnode_states(States) ->
     % io:format("\t Per vnode size keys in KL         \t ~p\n",[lists:sort(KLSize)]),
     % io:format("\t Syncs                             \t ~p\n",[Syncs]),
     % io:format("\t Average size NSK                  \t ~p\n",[dotted_db_utils:human_filesize(average(SizeNSK))]),
-    io:format("\t # entries NSK                     \t ~p\n",[lists:sort(LengthNSK1)]),
+    % io:format("\t # entries NSK                     \t ~p\n",[lists:sort(LengthNSK1)]),
     io:format("\t~s~s\n",color_good_if_zero(" Average # keys in NSK             \t ", average(LengthNSK2))),
     io:format("\t Per vnode # keys in NSK           \t ~p\n",[lists:sort(LengthNSK2)]),
     io:format("\t~s~s\n",color_good_if_zero(" Average # keys in RecoverKeys     \t ", average(LengthRKeys))),
@@ -845,8 +845,8 @@ process_vnode_state({Index, _Node, {ok, vs, {state, Id, _Atom, Index, _PeersIds,
     Size = byte_size(term_to_binary(DotKeyMap)),
     {Del,Wrt} = NSK,
     SizeNSK = byte_size(term_to_binary(NSK)),
-    LengthNSK1 = length(Wrt),
-    LengthNSK2 = lists:sum([dict:size(Dict) || {_,Dict} <- Wrt]) + length(Del),
+    % LengthNSK1 = length(Wrt),
+    LengthNSK2 = length(Wrt) + length(Del),
     % case LengthNSK2 of
     %     0 -> ok;
     %     _ -> lager:info("Clock: ~p\nNSK: ~p\n", [NodeClock, NSK])
@@ -870,7 +870,7 @@ process_vnode_state({Index, _Node, {ok, vs, {state, Id, _Atom, Index, _PeersIds,
         , kl_size       => Size %byte_size(term_to_binary(KeyLog))
         % , syncs         => Syncs2
         , nsk_size      => SizeNSK
-        , nsk_len1      => LengthNSK1
+        % , nsk_len1      => LengthNSK1
         , nsk_len2      => LengthNSK2
         , rkeys_len     => LengthRKeys
 

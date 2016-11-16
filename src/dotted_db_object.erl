@@ -10,6 +10,7 @@
             , get_fsm_time/1
             , set_fsm_time/2
             , strip/2
+            , strip2/2
             , fill/3
             , sync/2
             , add_to_node_clock/2
@@ -64,30 +65,21 @@ set_fsm_time(undefined, Object) ->
 set_fsm_time(FSMtime, Object) ->
     Object#object{lastFSMtime = FSMtime}.
 
--spec strip(bvv(), object()) -> object().
-strip(NodeClock, Object) ->
-    DCC = swc_kv:strip(get_container(Object), NodeClock),
+-spec strip(vv_matrix(), object()) -> object().
+strip(WM, Object) ->
+    MinWM = swc_watermark:min_all(WM, ?ENTRIES_WM),
+    DCC = swc_kv:strip_wm(get_container(Object), MinWM),
+    set_container(DCC, Object).
+
+-spec strip2(vv(), object()) -> object().
+strip2(MinWM, Object) ->
+    DCC = swc_kv:strip_wm(get_container(Object), MinWM),
     set_container(DCC, Object).
 
 -spec fill(key(), bvv(), object()) -> object().
-fill(Key, NodeClock, Object) ->
-    % ReplicaNodes = dotted_db_utils:replica_nodes(Key),
-    % DCC = swc_kv:fill(get_container(Object), NodeClock, ReplicaNodes),
-    % set_container(DCC, Object).
-    RNIndices = dotted_db_utils:replica_nodes_indices(Key),
-    case ?REPLICATION_FACTOR == length(RNIndices) of
-        true ->
-            % only consider ids that belong to both the list of ids received and the NodeClock
-            NodeVV = [{Id,N} || {Id={Index,_}, {N,_}} <- NodeClock, lists:member(Index, RNIndices)],
-            {D,VV} = get_container(Object),
-            DCC = {D, swc_vv:join(VV, NodeVV)},
-            set_container(DCC, Object);
-        false ->
-            lager:error("fill clock: RF:~p RNind:~p for key:~p indices:~p",
-                [?REPLICATION_FACTOR, length(RNIndices), Key, RNIndices]),
-            % swc_kv:fill(LocalClock, NodeClock)
-            ?REPLICATION_FACTOR = length(RNIndices)
-    end.
+fill(_Key, _NodeClock, Object) ->
+    % no fill in this version
+    Object.
 
 -spec sync(object(), object()) -> object().
 sync(O1, O2) ->

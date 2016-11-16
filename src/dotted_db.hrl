@@ -4,6 +4,7 @@
 
 -define(DEFAULT_TIMEOUT, 10000).
 -define(REPLICATION_FACTOR, 3).
+-define(ENTRIES_WM, (?REPLICATION_FACTOR*2)-1).
 % -define(R, 2).
 % -define(W, 2).
 -define(DEFAULT_BUCKET, <<"b">>).
