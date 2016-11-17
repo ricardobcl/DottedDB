@@ -17,6 +17,8 @@
 -define(ONE_WAY, one_way_sync).
 -define(TWO_WAY, two_way_sync).
 -define(DEFAULT_NODE_KILL_RATE, 0). % kill a vnode every x milliseconds; 0 = disabled
+-define(FILTER_DUPLICATE_KEYS, false).
+-define(FILTER_IRRELEVANT_KEYS, true).
 
 %% Options for read requests.
 -define(OPT_DO_RR, do_read_repair).

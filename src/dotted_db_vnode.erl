@@ -797,7 +797,10 @@ handle_sync_missing({sync_missing, ReqID, _RemoteID={RemoteIndex,_}, RemoteClock
         % get the keys corresponding to the missing dots,
         {MissingKeys0, _DotsNotFound} = swc_dotkeymap:get_keys(State#state.dotkeymap, MissingDots),
         % remove duplicate keys
-        MissingKeys = sets:to_list(sets:from_list(MissingKeys0)),
+        MissingKeys = case ?FILTER_DUPLICATE_KEYS of
+            false -> MissingKeys0;
+            true -> sets:to_list(sets:from_list(MissingKeys0))
+        end,
         % filter the keys that the asking node does not replicate
         RelevantMissingKeys = filter_irrelevant_keys(MissingKeys, RemoteIndex),
         % get each key's respective Object and strip any unnecessary causal information to save network
@@ -1119,8 +1122,12 @@ guaranteed_get_strip(Key, MinWM, State) ->
     end.
 
 filter_irrelevant_keys(Keys, Index) ->
-    FunFilterIrrelevant = fun(Key) -> lists:member(Index, dotted_db_utils:replica_nodes_indices(Key)) end,
-    lists:filter(FunFilterIrrelevant, Keys).
+    case ?FILTER_IRRELEVANT_KEYS of
+        false -> Keys;
+        true ->
+            FunFilterIrrelevant = fun(Key) -> lists:member(Index, dotted_db_utils:replica_nodes_indices(Key)) end,
+            lists:filter(FunFilterIrrelevant, Keys)
+    end.
 
 % @doc Saves the relevant vnode state to the storage.
 save_vnode_state(Dets, State={Id={Index,_},_,_,_,_}) ->
