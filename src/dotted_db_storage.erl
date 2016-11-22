@@ -14,6 +14,9 @@
             put/3,
             delete/2,
             write_batch/2,
+            put_async/3,
+            delete_async/2,
+            write_batch_async/2,
             fold/3,
             fold_keys/3,
             is_empty/1,
@@ -81,17 +84,34 @@ get(Storage, Key) ->
 %% @doc store the value associated to the key.
 -spec put(storage(), key(), value()) -> ok | {error, term()}.
 put(Storage, Key, Value) ->
-    gen_server:cast(Storage, {put, Key, Value}).
+    gen_server:call(Storage, {put, Key, Value}).
 
 %% @doc delete the value associated to the key
 -spec delete(storage(), key()) -> ok | {error, term()}.
 delete(Storage, Key) ->
-    gen_server:cast(Storage, {delete, Key}).
+    gen_server:call(Storage, {delete, Key}).
 
 %% @doc do multiple operations on the backend.
 -spec write_batch(storage(), multi_ops()) -> ok | {error, term()}.
+write_batch(_Storage, []) -> ok;
 write_batch(Storage, Ops) ->
-    gen_server:cast(Storage, {put_batch, Ops}).
+    gen_server:call(Storage, {put_batch, Ops}).
+
+%% @doc store the value associated to the key.
+-spec put_async(storage(), key(), value()) -> ok | {error, term()}.
+put_async(Storage, Key, Value) ->
+    gen_server:cast(Storage, {put_async, Key, Value}).
+
+%% @doc delete the value associated to the key
+-spec delete_async(storage(), key()) -> ok | {error, term()}.
+delete_async(Storage, Key) ->
+    gen_server:cast(Storage, {delete_async, Key}).
+
+%% @doc do multiple operations on the backend.
+-spec write_batch_async(storage(), multi_ops()) -> ok | {error, term()}.
+write_batch_async(_Storage, []) -> ok;
+write_batch_async(Storage, Ops) ->
+    gen_server:cast(Storage, {put_batch_async, Ops}).
 
 %% @doc fold all keys with a function
 -spec fold_keys(storage(), fun(), any()) -> any() | {error, term()}.
@@ -185,20 +205,42 @@ handle_call({drop, Pid}, _From, State) ->
             NewState = State#state{engine = Engine},
             {NewState, {error, Reason, Pid}}
     end,
-    {reply, Res, NS}.
+    {reply, Res, NS};
 
 
-handle_cast({put, Key, Value}, State) ->
+handle_call({put, Key, Value}, _From, State) ->
+    BKey = dotted_db_utils:encode_kv(Key),
+    rkvs:put(State#state.engine, BKey, Value),
+    {reply, ok, State};
+
+handle_call({delete, Key}, _From, State) ->
+    BKey = dotted_db_utils:encode_kv(Key),
+    rkvs:clear(State#state.engine, BKey),
+    {reply, ok, State};
+
+handle_call({put_batch, Ops}, _From, State) ->
+    Fun = fun
+            ({put, K, V}) -> {put, dotted_db_utils:encode_kv(K), V};
+            ({delete, K}) -> {delete, dotted_db_utils:encode_kv(K)}
+        end,
+    rkvs:write_batch(State#state.engine, lists:map(Fun, Ops)),
+    {reply, ok, State}.
+
+%%%%%%%%%%%%%
+%%% Casts -> Async functions
+%%%%%%%%%%%%%
+
+handle_cast({put_async, Key, Value}, State) ->
     BKey = dotted_db_utils:encode_kv(Key),
     rkvs:put(State#state.engine, BKey, Value),
     {noreply, State};
 
-handle_cast({delete, Key}, State) ->
+handle_cast({delete_async, Key}, State) ->
     BKey = dotted_db_utils:encode_kv(Key),
     rkvs:clear(State#state.engine, BKey),
     {noreply, State};
 
-handle_cast({put_batch, Ops}, State) ->
+handle_cast({put_batch_async, Ops}, State) ->
     Fun = fun
             ({put, K, V}) -> {put, dotted_db_utils:encode_kv(K), V};
             ({delete, K}) -> {delete, dotted_db_utils:encode_kv(K)}
