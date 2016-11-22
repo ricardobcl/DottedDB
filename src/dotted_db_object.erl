@@ -5,15 +5,17 @@
 %% API
 -export([     new/0
             , new/1
+            , is_object/1
             , get_container/1
             , set_container/2
             , get_fsm_time/1
             , set_fsm_time/2
             , strip/2
             , strip2/2
-            , fill/3
+            , fill/1
             , sync/2
             , add_to_node_clock/2
+            , already_seen/2
             , equal/2
             , equal_values/2
             , discard_values/2
@@ -32,6 +34,10 @@
 -export_type([object/0]).
 
 %% API
+
+-spec is_object(any()) -> boolean().
+is_object(#object{} = _Var) -> true;
+is_object(_) -> false.
 
 -spec new() -> object().
 new() ->
@@ -76,10 +82,10 @@ strip2(MinWM, Object) ->
     DCC = swc_kv:strip_wm(get_container(Object), MinWM),
     set_container(DCC, Object).
 
--spec fill(key(), bvv(), object()) -> object().
-fill(_Key, _NodeClock, Object) ->
-    % no fill in this version
-    Object.
+-spec fill(object()) -> object().
+fill(O) ->
+    DCC = swc_kv:fill(get_container(O)),
+    set_container(DCC, O).
 
 -spec sync(object(), object()) -> object().
 sync(O1, O2) ->
@@ -97,6 +103,10 @@ sync(O1, O2) ->
 -spec add_to_node_clock(bvv(), object()) -> bvv().
 add_to_node_clock(NodeClock, Object) ->
     swc_kv:add(NodeClock, get_container(Object)).
+
+-spec already_seen(bvv(), object()) -> boolean().
+already_seen(NodeClock, Object) ->
+    swc_node:already_seen(NodeClock, get_container(Object)).
 
 -spec equal(object(), object()) -> boolean().
 equal(O1, O2) ->

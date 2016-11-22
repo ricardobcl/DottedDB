@@ -17,7 +17,7 @@
 -define(ONE_WAY, one_way_sync).
 -define(TWO_WAY, two_way_sync).
 -define(DEFAULT_NODE_KILL_RATE, 0). % kill a vnode every x milliseconds; 0 = disabled
--define(FILTER_DUPLICATE_KEYS, false).
+-define(FILTER_DUPLICATE_KEYS, true).
 -define(FILTER_IRRELEVANT_KEYS, true).
 
 %% Options for read requests.
@@ -28,11 +28,11 @@
 -define(OPT_PUT_REPLICAS, put_replicas).
 -define(OPT_PUT_MIN_ACKS, put_acks).
 -define(REPLICATION_FAIL_RATIO, repl_fail_ratio).
--define(DEFAULT_REPLICATION_FAIL_RATIO, 0.5). % ratio of "lost" replicated put/deletes
+-define(DEFAULT_REPLICATION_FAIL_RATIO, 0.0). % ratio of "lost" replicated put/deletes
 
 %% Options for vnodes
 -define(REPORT_TICK_INTERVAL, 5000). % (ms) interval between report stats
--define(BUFFER_STRIP_INTERVAL, 1000). % (ms) interval between attempts to strip local keys (includes replicated keys)
+-define(BUFFER_STRIP_INTERVAL, 250). % (ms) interval between attempts to strip local keys (includes replicated keys)
 -define(MAX_KEYS_SENT_RECOVERING, 1000). % max sent at a time to a restarting node.
 
 %% STATS

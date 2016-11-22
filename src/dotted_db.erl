@@ -779,6 +779,7 @@ process_vnode_states(States) ->
     Dots            = [ begin #{dots           := Res} = R , Res end || R<- Results ],
     % EntriesWM       = [ begin #{entries_wm     := Res} = R , Res end || R<- Results ],
     RetiredWM       = [ begin #{retired_wm     := Res} = R , Res end || R<- Results ],
+    AverageWM       = [ begin #{average_wm     := Res} = R , Res end || R<- Results ],
     % ClockSize     = [ begin #{clock_size     := Res} = R , Res end || R<- Results ],
     ClockLen        = [ begin #{clock_len      := Res} = R , Res end || R<- Results ],
     Keys            = [ begin #{keys           := Res} = R , Res end || R<- Results ],
@@ -798,6 +799,8 @@ process_vnode_states(States) ->
     io:format("\t Per vnode # entries in clock      \t ~p\n",[lists:sort(ClockLen)]),
     io:format("\t~s~s\n",color_good_if_zero(" Average # retired nodes in WM     \t ", average(RetiredWM))),
     io:format("\t Per vnode # retired nodes WaterMark\t~p\n",[lists:sort(RetiredWM)]),
+    io:format("\t~s~s\n",color_good_if_zero(" Average # diff in WM              \t ", average(AverageWM))),
+    io:format("\t Per vnode # average diff  WaterMark\t~p\n",[lists:sort(AverageWM)]),
     % io:format("\t Average   # entries WaterMark     \t ~p\n", [[average(X) || X <- EntriesWM]]),
     % io:format("\t           # entries WaterMark     \t ~p\n", [[lists:sort(X) || X <- EntriesWM]]),
     io:format("\t~s~s\n",color_good_if_zero(" Average   # keys in KL            \t ", average(Keys))),
@@ -843,14 +846,8 @@ process_vnode_state({Index, _Node, {ok, vs, {state, Id, _Atom, Index, _PeersIds,
     %     _ -> ok
     % end,
     Size = byte_size(term_to_binary(DotKeyMap)),
-    {Del,Wrt} = NSK,
     SizeNSK = byte_size(term_to_binary(NSK)),
-    % LengthNSK1 = length(Wrt),
-    LengthNSK2 = length(Wrt) + length(Del),
-    % case LengthNSK2 of
-    %     0 -> ok;
-    %     _ -> lager:info("Clock: ~p\nNSK: ~p\n", [NodeClock, NSK])
-    % end,
+    LengthNSK = length(NSK),
     LengthRKeys = case RKeys of
         [] -> 0;
         _  ->
@@ -860,18 +857,29 @@ process_vnode_state({Index, _Node, {ok, vs, {state, Id, _Atom, Index, _PeersIds,
     {WM, RetiredPeers} = Watermark,
     EntriesInWatermark0 = orddict:map(fun (_,V) -> orddict:size(V) end, WM),
     EntriesInWatermark = [V || {_,V} <- orddict:to_list(EntriesInWatermark0)],
+    Fmax = fun(_,E) ->
+                KeysWM = orddict:fetch_keys(E),
+                ValuesWM = [orddict:fetch(KeyWM, E) || KeyWM <- KeysWM],
+                lists:max(ValuesWM)
+           end,
+    MaxWM = orddict:map(Fmax, WM),
+    MinWM = swc_watermark:min_all(Watermark),
+    DiffWM = orddict:merge(fun(_,Max,Min) -> Max-Min end, MaxWM, MinWM),
+    ValsWM = orddict:fold(fun(_K,V,Acc) -> [V|Acc] end, [], DiffWM),
+    AvgWM = average(ValsWM),
+    % AvgWM /= 0.0 andalso lager:info("VNODE2: ~p  --->>>  ~p ",[Id,WM]),
     #{
           dots          => average(MissingDots)
         , entries_wm    => EntriesInWatermark
         , retired_wm    => orddict:size(RetiredPeers)
+        , average_wm    => AvgWM
         , clock_size    => byte_size(term_to_binary(NodeClock))
         , clock_len     => orddict:size(NodeClock)
         , keys          => Keys %length(Keys)
         , kl_size       => Size %byte_size(term_to_binary(KeyLog))
         % , syncs         => Syncs2
         , nsk_size      => SizeNSK
-        % , nsk_len1      => LengthNSK1
-        , nsk_len2      => LengthNSK2
+        , nsk_len2      => LengthNSK
         , rkeys_len     => LengthRKeys
 
     }.

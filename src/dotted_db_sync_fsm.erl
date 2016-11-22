@@ -123,7 +123,7 @@ sync_repair_AB({ok, ReqID, IdB={IndexB,_}, ClockB, WatermarkB, _, MissingFromA},
                         from        = From,
                         node_b      = NodeB={IndexB,_},
                         node_a      = NodeA}) ->
-    dotted_db_vnode:sync_repair( [NodeA], {ReqID, NodeB, ClockB, WatermarkB, MissingFromA, NoReply}),
+    dotted_db_vnode:sync_repair( [NodeA], {ReqID, NodeB, IdB, ClockB, WatermarkB, MissingFromA, NoReply}),
     case NoReply of
         true ->
             From ! {ReqID, ok, sync},
@@ -138,12 +138,13 @@ sync_repair_AB({ok, ReqID, IdA={IndexA,_}, ClockA, WatermarkA, _, MissingFromB},
                         from         = From,
                         node_a       = NodeA={IndexA,_},
                         node_b       = NodeB,
+                        id_b         = IdB,
                         id_a         = IdA,
                         clock_b      = ClockB,
                         watermark_b  = WatermarkB,
                         miss_from_a  = MissingFromA}) ->
-    dotted_db_vnode:sync_repair( [NodeA], {ReqID, NodeB, ClockB, WatermarkB, MissingFromA, NoReply}),
-    dotted_db_vnode:sync_repair( [NodeB], {ReqID, NodeA, ClockA, WatermarkA, MissingFromB, NoReply}),
+    dotted_db_vnode:sync_repair( [NodeA], {ReqID, NodeB, IdB, ClockB, WatermarkB, MissingFromA, NoReply}),
+    dotted_db_vnode:sync_repair( [NodeB], {ReqID, NodeA, IdA, ClockA, WatermarkA, MissingFromB, NoReply}),
     case NoReply of
         true ->
             From ! {ReqID, ok, sync},
